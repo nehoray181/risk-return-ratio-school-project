@@ -1,3 +1,5 @@
+import datetime
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -19,16 +21,24 @@ PERIOD_OPTIONS = {
     "2Y": "2y",
     "5Y": "5y",
     "Max": "max",
+    "Custom": "custom",
 }
 
 RATIO_OPTIONS = [
-    "None",
     "Sharpe Ratio",
     "Sortino Ratio",
     "Treynor Ratio",
     "Information Ratio",
     "Calmar Ratio",
 ]
+
+RATIO_COLORS = {
+    "Sharpe Ratio": "#ff7f0e",
+    "Sortino Ratio": "#2ca02c",
+    "Treynor Ratio": "#d62728",
+    "Information Ratio": "#9467bd",
+    "Calmar Ratio": "#e377c2",
+}
 
 TRADING_DAYS_PER_YEAR = 252
 
@@ -38,6 +48,14 @@ TRADING_DAYS_PER_YEAR = 252
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_data(ticker: str, period: str) -> pd.DataFrame:
     df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+    return df
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_data_daterange(ticker: str, start: str, end: str) -> pd.DataFrame:
+    df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
     return df
@@ -180,10 +198,24 @@ ticker = st.sidebar.text_input("Stock / ETF Ticker", value="AAPL").strip().upper
 period_label = st.sidebar.selectbox("Time Period", list(PERIOD_OPTIONS.keys()), index=3)
 period = PERIOD_OPTIONS[period_label]
 
-selected_ratio = st.sidebar.selectbox("Risk/Return Ratio", RATIO_OPTIONS)
+custom_start: datetime.date | None = None
+custom_end: datetime.date | None = None
+if period_label == "Custom":
+    today = datetime.date.today()
+    default_start = today - datetime.timedelta(days=365)
+    custom_start = st.sidebar.date_input("Start Date", value=default_start, max_value=today)
+    custom_end = st.sidebar.date_input("End Date", value=today, max_value=today)
+    if custom_start >= custom_end:
+        st.sidebar.error("Start date must be before end date.")
+
+selected_ratios: list[str] = st.sidebar.multiselect(
+    "Risk/Return Ratios",
+    RATIO_OPTIONS,
+    default=["Sharpe Ratio"],
+)
 
 calc_mode = "Rolling"
-if selected_ratio != "None":
+if selected_ratios:
     calc_mode = st.sidebar.radio(
         "Calculation Mode",
         ["Rolling", "Full Period"],
@@ -198,7 +230,7 @@ window = st.sidebar.slider(
     value=60,
     step=5,
     help="Number of trading days used for the rolling ratio calculation.",
-    disabled=calc_mode == "Full Period",
+    disabled=(not selected_ratios) or (calc_mode == "Full Period"),
 )
 
 rf_annual = st.sidebar.number_input(
@@ -211,7 +243,7 @@ rf_annual = st.sidebar.number_input(
 )
 rf_daily = (rf_annual / 100) / TRADING_DAYS_PER_YEAR
 
-needs_benchmark = selected_ratio in ("Treynor Ratio", "Information Ratio")
+needs_benchmark = any(r in ("Treynor Ratio", "Information Ratio") for r in selected_ratios)
 benchmark_ticker = "^GSPC"
 if needs_benchmark:
     benchmark_ticker = (
@@ -227,7 +259,7 @@ with st.sidebar.expander("📐 Axis Scaling"):
     else:
         price_min, price_max = None, None
 
-    if selected_ratio != "None":
+    if selected_ratios:
         ratio_auto = st.checkbox("Auto scale — Ratio axis", value=True)
         if not ratio_auto:
             ratio_min = st.number_input("Ratio axis min", value=-5.0, step=0.5, format="%.2f")
@@ -246,8 +278,14 @@ if not ticker:
     st.warning("Please enter a ticker symbol in the sidebar.")
     st.stop()
 
-with st.spinner(f"Fetching data for **{ticker}**..."):
-    df = fetch_data(ticker, period)
+if period_label == "Custom" and custom_start and custom_end and custom_start < custom_end:
+    with st.spinner(f"Fetching data for **{ticker}**..."):
+        df = fetch_data_daterange(ticker, str(custom_start), str(custom_end))
+else:
+    if period_label == "Custom":
+        st.stop()
+    with st.spinner(f"Fetching data for **{ticker}**..."):
+        df = fetch_data(ticker, period)
 
 if df.empty:
     st.error(f"No data found for ticker **{ticker}**. Please check the symbol and try again.")
@@ -258,8 +296,12 @@ returns = prices.pct_change().dropna()
 
 bench_returns = None
 if needs_benchmark:
-    with st.spinner(f"Fetching benchmark **{benchmark_ticker}**..."):
-        bench_df = fetch_data(benchmark_ticker, period)
+    if period_label == "Custom" and custom_start and custom_end:
+        with st.spinner(f"Fetching benchmark **{benchmark_ticker}**..."):
+            bench_df = fetch_data_daterange(benchmark_ticker, str(custom_start), str(custom_end))
+    else:
+        with st.spinner(f"Fetching benchmark **{benchmark_ticker}**..."):
+            bench_df = fetch_data(benchmark_ticker, period)
     if bench_df.empty:
         st.error(f"No data found for benchmark **{benchmark_ticker}**.")
         st.stop()
@@ -267,44 +309,51 @@ if needs_benchmark:
     bench_returns = bench_prices.pct_change().dropna()
     bench_returns = bench_returns.reindex(returns.index)
 
-# ── compute ratio ────────────────────────────────────────────────────────────
+# ── compute ratios ───────────────────────────────────────────────────────────
 
-ratio_series = None
-full_period_val = None
-ratio_label = ""
-ratio_name_short = selected_ratio.replace(" Ratio", "")
+def _compute_rolling(name: str) -> pd.Series | None:
+    if name == "Sharpe Ratio":
+        return rolling_sharpe(returns, rf_daily, window)
+    if name == "Sortino Ratio":
+        return rolling_sortino(returns, rf_daily, window)
+    if name == "Treynor Ratio":
+        return rolling_treynor(returns, bench_returns, rf_daily, window)
+    if name == "Information Ratio":
+        return rolling_information(returns, bench_returns, window)
+    if name == "Calmar Ratio":
+        return rolling_calmar(prices, rf_daily, window)
+    return None
 
-if selected_ratio != "None":
+
+def _compute_full(name: str) -> float:
+    if name == "Sharpe Ratio":
+        return calc_full_sharpe(returns, rf_daily)
+    if name == "Sortino Ratio":
+        return calc_full_sortino(returns, rf_daily)
+    if name == "Treynor Ratio":
+        return calc_full_treynor(returns, bench_returns, rf_daily)
+    if name == "Information Ratio":
+        return calc_full_information(returns, bench_returns)
+    if name == "Calmar Ratio":
+        return calc_full_calmar(prices, rf_daily)
+    return np.nan
+
+
+rolling_results: dict[str, pd.Series] = {}
+full_period_results: dict[str, float] = {}
+
+for ratio_name in selected_ratios:
     if calc_mode == "Rolling":
-        if selected_ratio == "Sharpe Ratio":
-            ratio_series = rolling_sharpe(returns, rf_daily, window)
-        elif selected_ratio == "Sortino Ratio":
-            ratio_series = rolling_sortino(returns, rf_daily, window)
-        elif selected_ratio == "Treynor Ratio":
-            ratio_series = rolling_treynor(returns, bench_returns, rf_daily, window)
-        elif selected_ratio == "Information Ratio":
-            ratio_series = rolling_information(returns, bench_returns, window)
-        elif selected_ratio == "Calmar Ratio":
-            ratio_series = rolling_calmar(prices, rf_daily, window)
-        ratio_label = f"Rolling {ratio_name_short}"
+        series = _compute_rolling(ratio_name)
+        if series is not None:
+            rolling_results[ratio_name] = series
     else:
-        if selected_ratio == "Sharpe Ratio":
-            full_period_val = calc_full_sharpe(returns, rf_daily)
-        elif selected_ratio == "Sortino Ratio":
-            full_period_val = calc_full_sortino(returns, rf_daily)
-        elif selected_ratio == "Treynor Ratio":
-            full_period_val = calc_full_treynor(returns, bench_returns, rf_daily)
-        elif selected_ratio == "Information Ratio":
-            full_period_val = calc_full_information(returns, bench_returns)
-        elif selected_ratio == "Calmar Ratio":
-            full_period_val = calc_full_calmar(prices, rf_daily)
-        ratio_label = f"{ratio_name_short} (full period)"
+        full_period_results[ratio_name] = _compute_full(ratio_name)
 
 # ── build chart ─────────────────────────────────────────────────────────────
 
-has_rolling = ratio_series is not None
-has_full = full_period_val is not None and not np.isnan(full_period_val)
-has_ratio = has_rolling or has_full
+has_ratio = bool(rolling_results) or bool(full_period_results)
+zero_line_added = False
 
 fig = make_subplots(
     specs=[[{"secondary_y": True}]],
@@ -320,44 +369,52 @@ fig.add_trace(
     secondary_y=False,
 )
 
-if has_rolling:
-    clean_ratio = ratio_series.replace([np.inf, -np.inf], np.nan)
+for rname, rseries in rolling_results.items():
+    clean = rseries.replace([np.inf, -np.inf], np.nan)
+    short = rname.replace(" Ratio", "")
     fig.add_trace(
         go.Scatter(
-            x=clean_ratio.index,
-            y=clean_ratio.values,
-            name=ratio_label,
-            line=dict(color="#ff7f0e", width=1.5, dash="dot"),
+            x=clean.index,
+            y=clean.values,
+            name=f"Rolling {short}",
+            line=dict(color=RATIO_COLORS[rname], width=1.5, dash="dot"),
         ),
         secondary_y=True,
     )
-    fig.add_hline(
-        y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True,
-    )
+    if not zero_line_added:
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True)
+        zero_line_added = True
 
-if has_full:
+for rname, val in full_period_results.items():
+    if np.isnan(val):
+        continue
+    short = rname.replace(" Ratio", "")
+    color = RATIO_COLORS[rname]
     fig.add_hline(
-        y=full_period_val,
+        y=val,
         line_dash="solid",
-        line_color="#ff7f0e",
+        line_color=color,
         line_width=2,
         secondary_y=True,
-        annotation_text=f"{ratio_label} = {full_period_val:.4f}",
+        annotation_text=f"{short} = {val:.4f}",
         annotation_position="top left",
-        annotation_font_color="#ff7f0e",
+        annotation_font_color=color,
     )
-    fig.add_hline(
-        y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True,
-    )
+    if not zero_line_added:
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True)
+        zero_line_added = True
 
-title_suffix = ""
-if has_rolling:
-    title_suffix = f"  |  {ratio_label} (window={window}d)"
-elif has_full:
-    title_suffix = f"  |  {ratio_label} = {full_period_val:.4f}"
+title_parts = [f"{ticker} — {period_label}"]
+if rolling_results:
+    names = ", ".join(r.replace(" Ratio", "") for r in rolling_results)
+    title_parts.append(f"{names} (window={window}d)")
+elif full_period_results:
+    snippets = [f"{r.replace(' Ratio', '')}={v:.4f}" for r, v in full_period_results.items() if not np.isnan(v)]
+    if snippets:
+        title_parts.append(", ".join(snippets))
 
 fig.update_layout(
-    title=f"{ticker} — {period_label}{title_suffix}",
+    title="  |  ".join(title_parts),
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=560,
@@ -371,7 +428,10 @@ if not price_auto and price_min is not None and price_max is not None:
 fig.update_yaxes(secondary_y=False, **price_axis_opts)
 
 if has_ratio:
-    ratio_axis_opts = dict(title_text=ratio_label)
+    ratio_axis_label = "Ratio Value"
+    if len(selected_ratios) == 1:
+        ratio_axis_label = selected_ratios[0]
+    ratio_axis_opts = dict(title_text=ratio_axis_label)
     if not ratio_auto and ratio_min is not None and ratio_max is not None:
         ratio_axis_opts["range"] = [ratio_min, ratio_max]
     fig.update_yaxes(secondary_y=True, **ratio_axis_opts)
@@ -388,144 +448,139 @@ period_vol = returns.std() * np.sqrt(len(returns)) * 100
 n_years = len(returns) / TRADING_DAYS_PER_YEAR
 ann_return = ((1 + period_return / 100) ** (1 / n_years) - 1) * 100 if n_years > 0 else np.nan
 
-if full_period_val is not None:
-    full_ratio_value = full_period_val
-else:
-    full_ratio_value = np.nan
-    if selected_ratio == "Sharpe Ratio":
-        full_ratio_value = calc_full_sharpe(returns, rf_daily)
-    elif selected_ratio == "Sortino Ratio":
-        full_ratio_value = calc_full_sortino(returns, rf_daily)
-    elif selected_ratio == "Treynor Ratio":
-        full_ratio_value = calc_full_treynor(returns, bench_returns, rf_daily)
-    elif selected_ratio == "Information Ratio":
-        full_ratio_value = calc_full_information(returns, bench_returns)
-    elif selected_ratio == "Calmar Ratio":
-        full_ratio_value = calc_full_calmar(prices, rf_daily)
+full_ratio_values: dict[str, float] = {}
+for rname in selected_ratios:
+    if rname in full_period_results:
+        full_ratio_values[rname] = full_period_results[rname]
+    else:
+        full_ratio_values[rname] = _compute_full(rname)
 
-n_cols = 5 if selected_ratio != "None" else 4
+n_cols = 4 + len(selected_ratios)
 cols = st.columns(n_cols)
 cols[0].metric("Period Return", f"{period_return:.2f}%")
 cols[1].metric("Annualized Return", f"{ann_return:.2f}%")
 cols[2].metric(f"Volatility ({period_label})", f"{period_vol:.2f}%")
 cols[3].metric("Annualized Volatility", f"{annual_vol:.2f}%")
-if selected_ratio != "None":
-    cols[4].metric(
-        f"{selected_ratio} (full period)",
-        f"{full_ratio_value:.4f}" if not np.isnan(full_ratio_value) else "N/A",
+for i, rname in enumerate(selected_ratios):
+    val = full_ratio_values[rname]
+    cols[4 + i].metric(
+        f"{rname} (full)",
+        f"{val:.4f}" if not np.isnan(val) else "N/A",
     )
 
-if selected_ratio != "None":
+if selected_ratios:
     st.markdown("### Manual Calculation Inputs")
-    with st.expander("Show formula variables (for hand calculation)", expanded=False):
-        st.caption(
-            f"Values below are computed from the selected timeframe ({period_label}) "
-            "and match the full-period ratio calculation used in the app."
-        )
-
-        if selected_ratio == "Sharpe Ratio":
-            rp = returns.mean()
-            sigma_p = returns.std()
-            raw_ratio = (rp - rf_daily) / sigma_p if sigma_p != 0 else np.nan
-
-            st.code("Sharpe = ((Rp - Rf) / σp) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["σp", "Std. dev. of daily returns", f"{sigma_p * 100:.6f}%"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rf) / σp", "Raw daily Sharpe", f"{raw_ratio:.6f}"],
-                    ["Sharpe", "Final full-period Sharpe", f"{full_ratio_value:.6f}"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
+    for selected_ratio in selected_ratios:
+        full_ratio_value = full_ratio_values[selected_ratio]
+        with st.expander(f"📐 {selected_ratio} — formula variables", expanded=False):
+            st.caption(
+                f"Values below are computed from the selected timeframe ({period_label}) "
+                "and match the full-period ratio calculation used in the app."
             )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
 
-        elif selected_ratio == "Sortino Ratio":
-            rp = returns.mean()
-            downside = returns[returns < 0]
-            sigma_d = downside.std() if len(downside) >= 2 else np.nan
-            raw_ratio = (rp - rf_daily) / sigma_d if sigma_d and sigma_d != 0 else np.nan
+            if selected_ratio == "Sharpe Ratio":
+                rp = returns.mean()
+                sigma_p = returns.std()
+                raw_ratio = (rp - rf_daily) / sigma_p if sigma_p != 0 else np.nan
 
-            st.code("Sortino = ((Rp - Rf) / σd) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["σd", "Downside std. dev. (negative daily returns only)", f"{sigma_d * 100:.6f}%" if not np.isnan(sigma_d) else "N/A"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rf) / σd", "Raw daily Sortino", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
-                    ["Sortino", "Final full-period Sortino", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
+                st.code("Sharpe = ((Rp - Rf) / σp) × √252")
+                calc_df = pd.DataFrame(
+                    [
+                        ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
+                        ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
+                        ["σp", "Std. dev. of daily returns", f"{sigma_p * 100:.6f}%"],
+                        ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
+                        ["(Rp - Rf) / σp", "Raw daily Sharpe", f"{raw_ratio:.6f}"],
+                        ["Sharpe", "Final full-period Sharpe", f"{full_ratio_value:.6f}"],
+                    ],
+                    columns=["Variable", "Meaning", "Value"],
+                )
+                st.dataframe(calc_df, use_container_width=True, hide_index=True)
 
-        elif selected_ratio == "Treynor Ratio":
-            combined = pd.DataFrame({"asset": returns, "bench": bench_returns}).dropna()
-            beta_p = (
-                combined["asset"].cov(combined["bench"]) / combined["bench"].var()
-                if len(combined) >= 2 and combined["bench"].var() != 0
-                else np.nan
-            )
-            rp = returns.mean()
-            annual_excess = (rp - rf_daily) * TRADING_DAYS_PER_YEAR
+            elif selected_ratio == "Sortino Ratio":
+                rp = returns.mean()
+                downside = returns[returns < 0]
+                sigma_d = downside.std() if len(downside) >= 2 else np.nan
+                raw_ratio = (rp - rf_daily) / sigma_d if sigma_d and sigma_d != 0 else np.nan
 
-            st.code("Treynor = ((Rp - Rf) / βp) × 252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["βp", "Beta vs selected benchmark", f"{beta_p:.6f}" if not np.isnan(beta_p) else "N/A"],
-                    ["252", "Annualization multiplier", f"{TRADING_DAYS_PER_YEAR}"],
-                    ["(Rp - Rf) × 252", "Annualized excess return", f"{annual_excess * 100:.6f}%"],
-                    ["Treynor", "Final full-period Treynor", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
+                st.code("Sortino = ((Rp - Rf) / σd) × √252")
+                calc_df = pd.DataFrame(
+                    [
+                        ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
+                        ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
+                        ["σd", "Downside std. dev. (negative daily returns only)", f"{sigma_d * 100:.6f}%" if not np.isnan(sigma_d) else "N/A"],
+                        ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
+                        ["(Rp - Rf) / σd", "Raw daily Sortino", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
+                        ["Sortino", "Final full-period Sortino", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
+                    ],
+                    columns=["Variable", "Meaning", "Value"],
+                )
+                st.dataframe(calc_df, use_container_width=True, hide_index=True)
 
-        elif selected_ratio == "Information Ratio":
-            active = (returns - bench_returns).dropna()
-            rp = returns.mean()
-            rb = bench_returns.mean() if bench_returns is not None else np.nan
-            sigma_active = active.std() if len(active) >= 2 else np.nan
-            raw_ratio = active.mean() / sigma_active if sigma_active and sigma_active != 0 else np.nan
+            elif selected_ratio == "Treynor Ratio":
+                combined = pd.DataFrame({"asset": returns, "bench": bench_returns}).dropna()
+                beta_p = (
+                    combined["asset"].cov(combined["bench"]) / combined["bench"].var()
+                    if len(combined) >= 2 and combined["bench"].var() != 0
+                    else np.nan
+                )
+                rp = returns.mean()
+                annual_excess = (rp - rf_daily) * TRADING_DAYS_PER_YEAR
 
-            st.code("Information = ((Rp - Rb) / σ(Rp - Rb)) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily asset return", f"{rp * 100:.6f}%"],
-                    ["Rb", "Mean daily benchmark return", f"{rb * 100:.6f}%" if not np.isnan(rb) else "N/A"],
-                    ["σ(Rp-Rb)", "Std. dev. of active daily returns", f"{sigma_active * 100:.6f}%" if not np.isnan(sigma_active) else "N/A"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rb) / σ(Rp-Rb)", "Raw daily Information ratio", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
-                    ["Information", "Final full-period Information ratio", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
+                st.code("Treynor = ((Rp - Rf) / βp) × 252")
+                calc_df = pd.DataFrame(
+                    [
+                        ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
+                        ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
+                        ["βp", "Beta vs selected benchmark", f"{beta_p:.6f}" if not np.isnan(beta_p) else "N/A"],
+                        ["252", "Annualization multiplier", f"{TRADING_DAYS_PER_YEAR}"],
+                        ["(Rp - Rf) × 252", "Annualized excess return", f"{annual_excess * 100:.6f}%"],
+                        ["Treynor", "Final full-period Treynor", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
+                    ],
+                    columns=["Variable", "Meaning", "Value"],
+                )
+                st.dataframe(calc_df, use_container_width=True, hide_index=True)
 
-        elif selected_ratio == "Calmar Ratio":
-            total_return = prices.iloc[-1] / prices.iloc[0] - 1
-            years = len(prices) / TRADING_DAYS_PER_YEAR
-            rp_ann = (1 + total_return) ** (1 / years) - 1 if years > 0 else np.nan
-            rf_ann = rf_daily * TRADING_DAYS_PER_YEAR
-            cummax = prices.cummax()
-            drawdown = (prices - cummax) / cummax
-            dmax = abs(drawdown.min())
-            excess_ann = rp_ann - rf_ann if not np.isnan(rp_ann) else np.nan
+            elif selected_ratio == "Information Ratio":
+                active = (returns - bench_returns).dropna()
+                rp = returns.mean()
+                rb = bench_returns.mean() if bench_returns is not None else np.nan
+                sigma_active = active.std() if len(active) >= 2 else np.nan
+                raw_ratio = active.mean() / sigma_active if sigma_active and sigma_active != 0 else np.nan
 
-            st.code("Calmar = (Rp - Rf) / Dmax")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Annualized return over selected period", f"{rp_ann * 100:.6f}%" if not np.isnan(rp_ann) else "N/A"],
-                    ["Rf", "Annual risk-free rate", f"{rf_ann * 100:.6f}%"],
-                    ["Dmax", "Maximum drawdown (absolute)", f"{dmax:.6f}" if not np.isnan(dmax) else "N/A"],
-                    ["Rp - Rf", "Annualized excess return", f"{excess_ann * 100:.6f}%" if not np.isnan(excess_ann) else "N/A"],
-                    ["Calmar", "Final full-period Calmar", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
+                st.code("Information = ((Rp - Rb) / σ(Rp - Rb)) × √252")
+                calc_df = pd.DataFrame(
+                    [
+                        ["Rp", "Mean daily asset return", f"{rp * 100:.6f}%"],
+                        ["Rb", "Mean daily benchmark return", f"{rb * 100:.6f}%" if not np.isnan(rb) else "N/A"],
+                        ["σ(Rp-Rb)", "Std. dev. of active daily returns", f"{sigma_active * 100:.6f}%" if not np.isnan(sigma_active) else "N/A"],
+                        ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
+                        ["(Rp - Rb) / σ(Rp-Rb)", "Raw daily Information ratio", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
+                        ["Information", "Final full-period Information ratio", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
+                    ],
+                    columns=["Variable", "Meaning", "Value"],
+                )
+                st.dataframe(calc_df, use_container_width=True, hide_index=True)
+
+            elif selected_ratio == "Calmar Ratio":
+                total_return = prices.iloc[-1] / prices.iloc[0] - 1
+                years = len(prices) / TRADING_DAYS_PER_YEAR
+                rp_ann = (1 + total_return) ** (1 / years) - 1 if years > 0 else np.nan
+                rf_ann = rf_daily * TRADING_DAYS_PER_YEAR
+                cummax = prices.cummax()
+                drawdown = (prices - cummax) / cummax
+                dmax = abs(drawdown.min())
+                excess_ann = rp_ann - rf_ann if not np.isnan(rp_ann) else np.nan
+
+                st.code("Calmar = (Rp - Rf) / Dmax")
+                calc_df = pd.DataFrame(
+                    [
+                        ["Rp", "Annualized return over selected period", f"{rp_ann * 100:.6f}%" if not np.isnan(rp_ann) else "N/A"],
+                        ["Rf", "Annual risk-free rate", f"{rf_ann * 100:.6f}%"],
+                        ["Dmax", "Maximum drawdown (absolute)", f"{dmax:.6f}" if not np.isnan(dmax) else "N/A"],
+                        ["Rp - Rf", "Annualized excess return", f"{excess_ann * 100:.6f}%" if not np.isnan(excess_ann) else "N/A"],
+                        ["Calmar", "Final full-period Calmar", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
+                    ],
+                    columns=["Variable", "Meaning", "Value"],
+                )
+                st.dataframe(calc_df, use_container_width=True, hide_index=True)
