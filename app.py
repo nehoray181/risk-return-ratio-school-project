@@ -386,6 +386,7 @@ def build_chart(
     prices: pd.Series,
     rolling_results: dict[str, pd.Series],
     full_period_results: dict[str, float],
+    exp_fitted: pd.Series | None = None,
 ) -> go.Figure:
     """Build a Plotly figure (price + ratio traces) for one ticker."""
     has_ratio = bool(rolling_results) or bool(full_period_results)
@@ -402,6 +403,17 @@ def build_chart(
         ),
         secondary_y=False,
     )
+
+    if exp_fitted is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=exp_fitted.index,
+                y=exp_fitted.values,
+                name="Exp. Regression",
+                line=dict(color="#2ca02c", width=2, dash="dash"),
+            ),
+            secondary_y=False,
+        )
 
     for rname, rseries in rolling_results.items():
         clean = rseries.replace([np.inf, -np.inf], np.nan)
@@ -650,6 +662,64 @@ def render_manual_calcs(
                 ], columns=["Variable", "Meaning", "Value"]), use_container_width=True, hide_index=True)
 
 
+def render_exp_regression(container, prices: pd.Series):
+    """Compute and render the exponential regression analysis section."""
+    exp_a, exp_b, exp_r, fitted_series, score_series, final_score = calc_exp_regression(prices)
+    if fitted_series is None:
+        return None
+
+    container.markdown("---")
+    container.subheader("Exponential Regression Analysis")
+
+    current_price = float(prices.iloc[-1])
+    exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1)))
+    diff = exp_reg_at_end - current_price
+
+    if compare_mode:
+        c1, c2 = container.columns(2)
+        c1.metric("Pearson r", f"{exp_r:.4f}")
+        c2.metric("Exponent (b)", f"{exp_b:.8f}")
+        c3, c4 = container.columns(2)
+        c3.metric(
+            "ExpReg − Price", f"${diff:.2f}",
+            delta=f"{'above' if diff > 0 else 'below'} regression",
+            delta_color="normal" if diff > 0 else "inverse",
+        )
+        c4.metric("Score  (ExpReg−Price) × r × b", f"{final_score:.6f}")
+    else:
+        rc1, rc2, rc3, rc4 = container.columns(4)
+        rc1.metric("Pearson r", f"{exp_r:.4f}")
+        rc2.metric("Exponent (b)", f"{exp_b:.8f}")
+        rc3.metric(
+            "ExpReg − Price", f"${diff:.2f}",
+            delta=f"{'above' if diff > 0 else 'below'} regression",
+            delta_color="normal" if diff > 0 else "inverse",
+        )
+        rc4.metric("Score  (ExpReg−Price) × r × b", f"{final_score:.6f}")
+
+    container.code("Score = (ExpReg(t) − Price(t)) × r × b")
+    container.markdown(
+        "**Exponential regression**: y = a · e^(b·t)  \n"
+        "**r** = Pearson correlation (ln(price) vs. time)  \n"
+        "**b** = growth-rate exponent"
+    )
+    calc_df = pd.DataFrame(
+        [
+            ["a", "Regression intercept coefficient", f"{exp_a:.6f}"],
+            ["b", "Regression exponent (growth rate per day)", f"{exp_b:.8f}"],
+            ["r", "Pearson correlation coefficient", f"{exp_r:.6f}"],
+            ["ExpReg(T)", "Regression predicted price at last day", f"${exp_reg_at_end:.2f}"],
+            ["Price(T)", "Actual current price", f"${current_price:.2f}"],
+            ["ExpReg − Price", "Difference (regression − actual)", f"${diff:.2f}"],
+            ["Score", "(ExpReg − Price) × r × b", f"{final_score:.6f}"],
+        ],
+        columns=["Variable", "Meaning", "Value"],
+    )
+    container.dataframe(calc_df, use_container_width=True, hide_index=True)
+
+    return fitted_series
+
+
 def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     """Full render pipeline for one stock inside *container*."""
     df = load_stock_data(tk)
@@ -664,12 +734,19 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     if br is not None:
         br = br.reindex(returns.index)
 
+    exp_fitted = None
+    if show_exp_reg:
+        _, _, _, exp_fitted, _, _ = calc_exp_regression(prices)
+
     rolling_res, full_res = compute_ratios(prices, returns, br)
-    fig = build_chart(tk, prices, rolling_res, full_res)
+    fig = build_chart(tk, prices, rolling_res, full_res, exp_fitted=exp_fitted)
     container.plotly_chart(fig, use_container_width=True)
 
     frv = render_summary(container, tk, prices, returns, br, full_res)
     render_manual_calcs(container, prices, returns, br, frv)
+
+    if show_exp_reg:
+        render_exp_regression(container, prices)
 
 
 # ── main area ───────────────────────────────────────────────────────────────
@@ -697,7 +774,6 @@ if needs_benchmark:
     bench_prices = bench_df["Close"]
     bench_returns_global = bench_prices.pct_change().dropna()
 
-<<<<<<< Updated upstream
 if compare_mode and ticker_b:
     col_a, col_b = st.columns(2, gap="large")
     with col_a:
@@ -706,331 +782,3 @@ if compare_mode and ticker_b:
         render_stock_panel(col_b, ticker_b, bench_returns_global)
 else:
     render_stock_panel(st, ticker, bench_returns_global)
-=======
-# ── compute ratio ────────────────────────────────────────────────────────────
-
-ratio_series = None
-full_period_val = None
-ratio_label = ""
-ratio_name_short = selected_ratio.replace(" Ratio", "")
-
-exp_fitted_series = None
-exp_score_series = None
-exp_a = exp_b = exp_r = exp_final_score = np.nan
-
-if show_exp_reg:
-    exp_a, exp_b, exp_r, exp_fitted_series, exp_score_series, exp_final_score = calc_exp_regression(prices)
-
-if selected_ratio != "None":
-    if calc_mode == "Rolling":
-        if selected_ratio == "Sharpe Ratio":
-            ratio_series = rolling_sharpe(returns, rf_daily, window)
-        elif selected_ratio == "Sortino Ratio":
-            ratio_series = rolling_sortino(returns, rf_daily, window)
-        elif selected_ratio == "Treynor Ratio":
-            ratio_series = rolling_treynor(returns, bench_returns, rf_daily, window)
-        elif selected_ratio == "Information Ratio":
-            ratio_series = rolling_information(returns, bench_returns, window)
-        elif selected_ratio == "Calmar Ratio":
-            ratio_series = rolling_calmar(prices, rf_daily, window)
-        ratio_label = f"Rolling {ratio_name_short}"
-    else:
-        if selected_ratio == "Sharpe Ratio":
-            full_period_val = calc_full_sharpe(returns, rf_daily)
-        elif selected_ratio == "Sortino Ratio":
-            full_period_val = calc_full_sortino(returns, rf_daily)
-        elif selected_ratio == "Treynor Ratio":
-            full_period_val = calc_full_treynor(returns, bench_returns, rf_daily)
-        elif selected_ratio == "Information Ratio":
-            full_period_val = calc_full_information(returns, bench_returns)
-        elif selected_ratio == "Calmar Ratio":
-            full_period_val = calc_full_calmar(prices, rf_daily)
-        ratio_label = f"{ratio_name_short} (full period)"
-
-# ── build chart ─────────────────────────────────────────────────────────────
-
-has_rolling = ratio_series is not None
-has_full = full_period_val is not None and not np.isnan(full_period_val)
-has_ratio = has_rolling or has_full
-
-fig = make_subplots(
-    specs=[[{"secondary_y": True}]],
-)
-
-fig.add_trace(
-    go.Scatter(
-        x=prices.index,
-        y=prices.values,
-        name=f"{ticker} Price",
-        line=dict(color="#1f77b4", width=2),
-    ),
-    secondary_y=False,
-)
-
-if exp_fitted_series is not None:
-    fig.add_trace(
-        go.Scatter(
-            x=exp_fitted_series.index,
-            y=exp_fitted_series.values,
-            name="Exp. Regression",
-            line=dict(color="#2ca02c", width=2, dash="dash"),
-        ),
-        secondary_y=False,
-    )
-
-if has_rolling:
-    clean_ratio = ratio_series.replace([np.inf, -np.inf], np.nan)
-    fig.add_trace(
-        go.Scatter(
-            x=clean_ratio.index,
-            y=clean_ratio.values,
-            name=ratio_label,
-            line=dict(color="#ff7f0e", width=1.5, dash="dot"),
-        ),
-        secondary_y=True,
-    )
-    fig.add_hline(
-        y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True,
-    )
-
-if has_full:
-    fig.add_hline(
-        y=full_period_val,
-        line_dash="solid",
-        line_color="#ff7f0e",
-        line_width=2,
-        secondary_y=True,
-        annotation_text=f"{ratio_label} = {full_period_val:.4f}",
-        annotation_position="top left",
-        annotation_font_color="#ff7f0e",
-    )
-    fig.add_hline(
-        y=0, line_dash="dash", line_color="gray", opacity=0.5, secondary_y=True,
-    )
-
-title_suffix = ""
-if has_rolling:
-    title_suffix = f"  |  {ratio_label} (window={window}d)"
-elif has_full:
-    title_suffix = f"  |  {ratio_label} = {full_period_val:.4f}"
-
-fig.update_layout(
-    title=f"{ticker} — {period_label}{title_suffix}",
-    hovermode="x unified",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    height=560,
-    margin=dict(l=60, r=60, t=80, b=40),
-)
-fig.update_xaxes(title_text="Date")
-
-price_axis_opts = dict(title_text="Price ($)")
-if not price_auto and price_min is not None and price_max is not None:
-    price_axis_opts["range"] = [price_min, price_max]
-fig.update_yaxes(secondary_y=False, **price_axis_opts)
-
-if has_ratio:
-    ratio_axis_opts = dict(title_text=ratio_label)
-    if not ratio_auto and ratio_min is not None and ratio_max is not None:
-        ratio_axis_opts["range"] = [ratio_min, ratio_max]
-    fig.update_yaxes(secondary_y=True, **ratio_axis_opts)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# ── summary statistics ──────────────────────────────────────────────────────
-
-st.subheader("Summary Statistics")
-
-period_return = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
-annual_vol = returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
-period_vol = returns.std() * np.sqrt(len(returns)) * 100
-n_years = len(returns) / TRADING_DAYS_PER_YEAR
-ann_return = ((1 + period_return / 100) ** (1 / n_years) - 1) * 100 if n_years > 0 else np.nan
-
-if full_period_val is not None:
-    full_ratio_value = full_period_val
-else:
-    full_ratio_value = np.nan
-    if selected_ratio == "Sharpe Ratio":
-        full_ratio_value = calc_full_sharpe(returns, rf_daily)
-    elif selected_ratio == "Sortino Ratio":
-        full_ratio_value = calc_full_sortino(returns, rf_daily)
-    elif selected_ratio == "Treynor Ratio":
-        full_ratio_value = calc_full_treynor(returns, bench_returns, rf_daily)
-    elif selected_ratio == "Information Ratio":
-        full_ratio_value = calc_full_information(returns, bench_returns)
-    elif selected_ratio == "Calmar Ratio":
-        full_ratio_value = calc_full_calmar(prices, rf_daily)
-
-n_cols = 5 if selected_ratio != "None" else 4
-cols = st.columns(n_cols)
-cols[0].metric("Period Return", f"{period_return:.2f}%")
-cols[1].metric("Annualized Return", f"{ann_return:.2f}%")
-cols[2].metric(f"Volatility ({period_label})", f"{period_vol:.2f}%")
-cols[3].metric("Annualized Volatility", f"{annual_vol:.2f}%")
-if selected_ratio != "None":
-    cols[4].metric(
-        f"{selected_ratio} (full period)",
-        f"{full_ratio_value:.4f}" if not np.isnan(full_ratio_value) else "N/A",
-    )
-
-if selected_ratio != "None":
-    st.markdown("### Manual Calculation Inputs")
-    with st.expander("Show formula variables (for hand calculation)", expanded=False):
-        st.caption(
-            f"Values below are computed from the selected timeframe ({period_label}) "
-            "and match the full-period ratio calculation used in the app."
-        )
-
-        if selected_ratio == "Sharpe Ratio":
-            rp = returns.mean()
-            sigma_p = returns.std()
-            raw_ratio = (rp - rf_daily) / sigma_p if sigma_p != 0 else np.nan
-
-            st.code("Sharpe = ((Rp - Rf) / σp) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["σp", "Std. dev. of daily returns", f"{sigma_p * 100:.6f}%"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rf) / σp", "Raw daily Sharpe", f"{raw_ratio:.6f}"],
-                    ["Sharpe", "Final full-period Sharpe", f"{full_ratio_value:.6f}"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
-
-        elif selected_ratio == "Sortino Ratio":
-            rp = returns.mean()
-            downside = returns[returns < 0]
-            sigma_d = downside.std() if len(downside) >= 2 else np.nan
-            raw_ratio = (rp - rf_daily) / sigma_d if sigma_d and sigma_d != 0 else np.nan
-
-            st.code("Sortino = ((Rp - Rf) / σd) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["σd", "Downside std. dev. (negative daily returns only)", f"{sigma_d * 100:.6f}%" if not np.isnan(sigma_d) else "N/A"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rf) / σd", "Raw daily Sortino", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
-                    ["Sortino", "Final full-period Sortino", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
-
-        elif selected_ratio == "Treynor Ratio":
-            combined = pd.DataFrame({"asset": returns, "bench": bench_returns}).dropna()
-            beta_p = (
-                combined["asset"].cov(combined["bench"]) / combined["bench"].var()
-                if len(combined) >= 2 and combined["bench"].var() != 0
-                else np.nan
-            )
-            rp = returns.mean()
-            annual_excess = (rp - rf_daily) * TRADING_DAYS_PER_YEAR
-
-            st.code("Treynor = ((Rp - Rf) / βp) × 252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily return", f"{rp * 100:.6f}%"],
-                    ["Rf", "Daily risk-free rate", f"{rf_daily * 100:.6f}%"],
-                    ["βp", "Beta vs selected benchmark", f"{beta_p:.6f}" if not np.isnan(beta_p) else "N/A"],
-                    ["252", "Annualization multiplier", f"{TRADING_DAYS_PER_YEAR}"],
-                    ["(Rp - Rf) × 252", "Annualized excess return", f"{annual_excess * 100:.6f}%"],
-                    ["Treynor", "Final full-period Treynor", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
-
-        elif selected_ratio == "Information Ratio":
-            active = (returns - bench_returns).dropna()
-            rp = returns.mean()
-            rb = bench_returns.mean() if bench_returns is not None else np.nan
-            sigma_active = active.std() if len(active) >= 2 else np.nan
-            raw_ratio = active.mean() / sigma_active if sigma_active and sigma_active != 0 else np.nan
-
-            st.code("Information = ((Rp - Rb) / σ(Rp - Rb)) × √252")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Mean daily asset return", f"{rp * 100:.6f}%"],
-                    ["Rb", "Mean daily benchmark return", f"{rb * 100:.6f}%" if not np.isnan(rb) else "N/A"],
-                    ["σ(Rp-Rb)", "Std. dev. of active daily returns", f"{sigma_active * 100:.6f}%" if not np.isnan(sigma_active) else "N/A"],
-                    ["√252", "Annualization factor", f"{np.sqrt(TRADING_DAYS_PER_YEAR):.6f}"],
-                    ["(Rp - Rb) / σ(Rp-Rb)", "Raw daily Information ratio", f"{raw_ratio:.6f}" if not np.isnan(raw_ratio) else "N/A"],
-                    ["Information", "Final full-period Information ratio", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
-
-        elif selected_ratio == "Calmar Ratio":
-            total_return = prices.iloc[-1] / prices.iloc[0] - 1
-            years = len(prices) / TRADING_DAYS_PER_YEAR
-            rp_ann = (1 + total_return) ** (1 / years) - 1 if years > 0 else np.nan
-            rf_ann = rf_daily * TRADING_DAYS_PER_YEAR
-            cummax = prices.cummax()
-            drawdown = (prices - cummax) / cummax
-            dmax = abs(drawdown.min())
-            excess_ann = rp_ann - rf_ann if not np.isnan(rp_ann) else np.nan
-
-            st.code("Calmar = (Rp - Rf) / Dmax")
-            calc_df = pd.DataFrame(
-                [
-                    ["Rp", "Annualized return over selected period", f"{rp_ann * 100:.6f}%" if not np.isnan(rp_ann) else "N/A"],
-                    ["Rf", "Annual risk-free rate", f"{rf_ann * 100:.6f}%"],
-                    ["Dmax", "Maximum drawdown (absolute)", f"{dmax:.6f}" if not np.isnan(dmax) else "N/A"],
-                    ["Rp - Rf", "Annualized excess return", f"{excess_ann * 100:.6f}%" if not np.isnan(excess_ann) else "N/A"],
-                    ["Calmar", "Final full-period Calmar", f"{full_ratio_value:.6f}" if not np.isnan(full_ratio_value) else "N/A"],
-                ],
-                columns=["Variable", "Meaning", "Value"],
-            )
-            st.dataframe(calc_df, use_container_width=True, hide_index=True)
-
-
-# ── exponential regression section (always visible) ─────────────────────────
-
-if show_exp_reg and exp_fitted_series is not None:
-    st.markdown("---")
-    st.subheader("Exponential Regression Analysis")
-
-    current_price = float(prices.iloc[-1])
-    exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1))) if not np.isnan(exp_a) else np.nan
-    diff = exp_reg_at_end - current_price if not np.isnan(exp_reg_at_end) else np.nan
-
-    rc1, rc2, rc3, rc4 = st.columns(4)
-    rc1.metric("Pearson r", f"{exp_r:.4f}" if not np.isnan(exp_r) else "N/A")
-    rc2.metric("Exponent (b)", f"{exp_b:.8f}" if not np.isnan(exp_b) else "N/A")
-    rc3.metric(
-        "ExpReg − Price",
-        f"${diff:.2f}" if not np.isnan(diff) else "N/A",
-        delta=f"{'above' if diff > 0 else 'below'} regression" if not np.isnan(diff) else None,
-        delta_color="normal" if not np.isnan(diff) and diff > 0 else "inverse",
-    )
-    rc4.metric(
-        "Score  (ExpReg−Price) × r × b",
-        f"{exp_final_score:.6f}" if not np.isnan(exp_final_score) else "N/A",
-    )
-
-    st.code("Score = (ExpReg(t) − Price(t)) × r × b")
-    st.markdown(
-        "**Exponential regression**: y = a · e^(b·t)  \n"
-        "**r** = Pearson correlation (ln(price) vs. time)  \n"
-        "**b** = growth-rate exponent"
-    )
-
-    calc_df = pd.DataFrame(
-        [
-            ["a", "Regression intercept coefficient", f"{exp_a:.6f}" if not np.isnan(exp_a) else "N/A"],
-            ["b", "Regression exponent (growth rate per day)", f"{exp_b:.8f}" if not np.isnan(exp_b) else "N/A"],
-            ["r", "Pearson correlation coefficient", f"{exp_r:.6f}" if not np.isnan(exp_r) else "N/A"],
-            ["ExpReg(T)", "Regression predicted price at last day", f"${exp_reg_at_end:.2f}" if not np.isnan(exp_reg_at_end) else "N/A"],
-            ["Price(T)", "Actual current price", f"${current_price:.2f}"],
-            ["ExpReg − Price", "Difference (regression − actual)", f"${diff:.2f}" if not np.isnan(diff) else "N/A"],
-            ["Score", "(ExpReg − Price) × r × b", f"{exp_final_score:.6f}" if not np.isnan(exp_final_score) else "N/A"],
-        ],
-        columns=["Variable", "Meaning", "Value"],
-    )
-    st.dataframe(calc_df, use_container_width=True, hide_index=True)
->>>>>>> Stashed changes
