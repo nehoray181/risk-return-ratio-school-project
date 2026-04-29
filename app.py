@@ -282,6 +282,17 @@ window = st.sidebar.slider(
 st.sidebar.markdown("---")
 show_exp_reg = st.sidebar.checkbox("Show Exp. Regression & Score", value=True)
 
+score_use_diff = True
+score_use_r = True
+score_use_b = True
+score_use_ratio = False
+if show_exp_reg:
+    with st.sidebar.expander("🧮 Score Formula Parameters"):
+        score_use_diff = st.checkbox("(ExpReg − Price)  Difference", value=True)
+        score_use_r = st.checkbox("r  Pearson correlation", value=True)
+        score_use_b = st.checkbox("b  Exponent (growth rate)", value=True)
+        score_use_ratio = st.checkbox("Ratio  Risk/Return ratio", value=False)
+
 rf_annual = st.sidebar.number_input(
     "Risk-Free Rate (annual %)",
     min_value=0.0,
@@ -662,9 +673,9 @@ def render_manual_calcs(
                 ], columns=["Variable", "Meaning", "Value"]), use_container_width=True, hide_index=True)
 
 
-def render_exp_regression(container, prices: pd.Series):
+def render_exp_regression(container, prices: pd.Series, ratio_value: float):
     """Compute and render the exponential regression analysis section."""
-    exp_a, exp_b, exp_r, fitted_series, score_series, final_score = calc_exp_regression(prices)
+    exp_a, exp_b, exp_r, fitted_series, _, _ = calc_exp_regression(prices)
     if fitted_series is None:
         return None
 
@@ -675,46 +686,69 @@ def render_exp_regression(container, prices: pd.Series):
     exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1)))
     diff = exp_reg_at_end - current_price
 
-    if compare_mode:
-        c1, c2 = container.columns(2)
-        c1.metric("Pearson r", f"{exp_r:.4f}")
-        c2.metric("Exponent (b)", f"{exp_b:.8f}")
-        c3, c4 = container.columns(2)
-        c3.metric(
-            "ExpReg − Price", f"${diff:.2f}",
-            delta=f"{'above' if diff > 0 else 'below'} regression",
-            delta_color="normal" if diff > 0 else "inverse",
-        )
-        c4.metric("Score  (ExpReg−Price) × r × b", f"{final_score:.6f}")
-    else:
-        rc1, rc2, rc3, rc4 = container.columns(4)
-        rc1.metric("Pearson r", f"{exp_r:.4f}")
-        rc2.metric("Exponent (b)", f"{exp_b:.8f}")
-        rc3.metric(
-            "ExpReg − Price", f"${diff:.2f}",
-            delta=f"{'above' if diff > 0 else 'below'} regression",
-            delta_color="normal" if diff > 0 else "inverse",
-        )
-        rc4.metric("Score  (ExpReg−Price) × r × b", f"{final_score:.6f}")
+    custom_score = 1.0
+    formula_parts = []
+    if score_use_diff:
+        custom_score *= diff
+        formula_parts.append("(ExpReg − Price)")
+    if score_use_r:
+        custom_score *= exp_r
+        formula_parts.append("r")
+    if score_use_b:
+        custom_score *= exp_b
+        formula_parts.append("b")
+    if score_use_ratio and not np.isnan(ratio_value):
+        custom_score *= ratio_value
+        formula_parts.append("Ratio")
 
-    container.code("Score = (ExpReg(t) − Price(t)) × r × b")
+    if not formula_parts:
+        custom_score = 0.0
+        formula_str = "No parameters selected"
+    else:
+        formula_str = "Score = " + " × ".join(formula_parts)
+
+    metrics = [
+        ("Pearson r", f"{exp_r:.4f}"),
+        ("Exponent (b)", f"{exp_b:.8f}"),
+        ("ExpReg − Price", f"${diff:.2f}"),
+    ]
+    if score_use_ratio:
+        ratio_display = f"{ratio_value:.4f}" if not np.isnan(ratio_value) else "N/A"
+        metrics.append(("Ratio", ratio_display))
+    metrics.append(("Score", f"{custom_score:.6f}"))
+
+    if compare_mode:
+        for i in range(0, len(metrics), 2):
+            cols = container.columns(2)
+            cols[0].metric(metrics[i][0], metrics[i][1])
+            if i + 1 < len(metrics):
+                cols[1].metric(metrics[i + 1][0], metrics[i + 1][1])
+    else:
+        cols = container.columns(len(metrics))
+        for i, (label, val) in enumerate(metrics):
+            cols[i].metric(label, val)
+
+    container.code(formula_str)
     container.markdown(
         "**Exponential regression**: y = a · e^(b·t)  \n"
         "**r** = Pearson correlation (ln(price) vs. time)  \n"
         "**b** = growth-rate exponent"
     )
-    calc_df = pd.DataFrame(
-        [
-            ["a", "Regression intercept coefficient", f"{exp_a:.6f}"],
-            ["b", "Regression exponent (growth rate per day)", f"{exp_b:.8f}"],
-            ["r", "Pearson correlation coefficient", f"{exp_r:.6f}"],
-            ["ExpReg(T)", "Regression predicted price at last day", f"${exp_reg_at_end:.2f}"],
-            ["Price(T)", "Actual current price", f"${current_price:.2f}"],
-            ["ExpReg − Price", "Difference (regression − actual)", f"${diff:.2f}"],
-            ["Score", "(ExpReg − Price) × r × b", f"{final_score:.6f}"],
-        ],
-        columns=["Variable", "Meaning", "Value"],
-    )
+
+    rows = [
+        ["a", "Regression intercept coefficient", f"{exp_a:.6f}"],
+        ["b", "Regression exponent (growth rate per day)", f"{exp_b:.8f}"],
+        ["r", "Pearson correlation coefficient", f"{exp_r:.6f}"],
+        ["ExpReg(T)", "Regression predicted price at last day", f"${exp_reg_at_end:.2f}"],
+        ["Price(T)", "Actual current price", f"${current_price:.2f}"],
+        ["ExpReg − Price", "Difference (regression − actual)", f"${diff:.2f}"],
+    ]
+    if score_use_ratio:
+        rows.append(["Ratio", "Selected risk/return ratio value",
+                      f"{ratio_value:.6f}" if not np.isnan(ratio_value) else "N/A"])
+    rows.append(["Score", formula_str.replace("Score = ", ""), f"{custom_score:.6f}"])
+
+    calc_df = pd.DataFrame(rows, columns=["Variable", "Meaning", "Value"])
     container.dataframe(calc_df, use_container_width=True, hide_index=True)
 
     return fitted_series
@@ -746,7 +780,11 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     render_manual_calcs(container, prices, returns, br, frv)
 
     if show_exp_reg:
-        render_exp_regression(container, prices)
+        combined_ratio = np.nan
+        ratio_vals = [v for v in frv.values() if not np.isnan(v)]
+        if ratio_vals:
+            combined_ratio = np.mean(ratio_vals)
+        render_exp_regression(container, prices, combined_ratio)
 
 
 # ── main area ───────────────────────────────────────────────────────────────
