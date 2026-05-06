@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from dateutil.relativedelta import relativedelta
 
 st.set_page_config(
     page_title="Risk/Return Ratio Dashboard",
@@ -224,9 +225,424 @@ def calc_exp_regression(prices: pd.Series):
     return a, b, pearson_r, fitted_series, score_series, final_score
 
 
+# ── backtest validator ──────────────────────────────────────────────────────
+
+DEFAULT_ETF_LIST = [
+    # broad US equity
+    "SPY", "VOO", "IVV", "VTI", "QQQ",
+    "DIA", "IWM", "IJH", "IJR", "VB", "VO",
+    # style / factor
+    "VUG", "VTV", "IWF", "IWD", "MTUM", "QUAL", "VLUE", "USMV", "SPLV", "SPHQ",
+    # dividend / income
+    "SCHD", "VIG", "VYM", "DVY", "NOBL", "HDV", "DGRO",
+    # sectors (SPDR + Vanguard)
+    "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC",
+    "VGT", "VHT", "VFH", "VDE", "VNQ",
+    "SMH", "SOXX", "KRE", "KBE", "ITB", "XHB", "IBB", "XBI",
+    # themes / growth
+    "ARKK", "ARKG", "ARKQ", "ARKW", "ARKF", "ICLN", "TAN", "LIT", "FAN", "BOTZ", "ROBO",
+    # international
+    "EFA", "VEA", "IEFA", "IEMG", "EEM", "VWO", "FXI", "MCHI", "EWJ", "EWZ", "INDA", "EWG", "EWU", "EWY",
+    # bonds
+    "AGG", "BND", "BNDX", "TLT", "IEF", "SHY", "LQD", "HYG", "JNK", "MUB", "TIP",
+    # commodities / gold
+    "GLD", "IAU", "GLDM", "SLV", "USO", "UNG", "DBC", "PDBC",
+    # crypto-related
+    "IBIT", "FBTC", "ETHE", "BITO",
+]
+
+
+FACTOR_KEYS = ["diff", "r", "b", "sharpe", "sortino"]
+FACTOR_LABELS = {
+    "diff": "(ExpReg − Price)",
+    "r": "r",
+    "b": "b",
+    "sharpe": "Sharpe",
+    "sortino": "Sortino",
+}
+
+
+def compute_factors(
+    tk: str,
+    train_start: datetime.date,
+    test_start: datetime.date,
+    test_end: datetime.date,
+    rf_daily_bt: float,
+) -> dict | None:
+    """Fetch one ticker, return raw factors + actuals. Formula-agnostic."""
+    df = fetch_data_daterange(tk, str(train_start), str(test_end))
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+
+    prices_all = df["Close"].dropna()
+    if prices_all.empty:
+        return None
+
+    split_ts = pd.Timestamp(test_start)
+    train_prices = prices_all[prices_all.index < split_ts]
+    test_prices = prices_all[prices_all.index >= split_ts]
+    if len(train_prices) < 10 or len(test_prices) < 5:
+        return None
+
+    _, b, r, fitted, _, _ = calc_exp_regression(train_prices)
+    if fitted is None or np.isnan(b) or np.isnan(r):
+        return None
+
+    diff = float(fitted.iloc[-1]) - float(train_prices.iloc[-1])
+    train_ret = train_prices.pct_change().dropna()
+    sharpe = calc_full_sharpe(train_ret, rf_daily_bt)
+    sortino = calc_full_sortino(train_ret, rf_daily_bt)
+    train_total_ret = float(train_prices.iloc[-1] / train_prices.iloc[0] - 1)
+    actual_ret = float(test_prices.iloc[-1] / test_prices.iloc[0] - 1)
+
+    return {
+        "ticker": tk,
+        "diff": diff,
+        "r": float(r),
+        "b": float(b),
+        "sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan,
+        "sortino": float(sortino) if not np.isnan(sortino) else np.nan,
+        "train_total_ret": train_total_ret,
+        "actual_ret": actual_ret,
+    }
+
+
+def apply_formula(factors: dict, components: dict[str, bool]) -> tuple[float, str]:
+    """Multiply selected factors into a score; return (score, formula_str).
+
+    Skips NaN factors (Sharpe/Sortino can be NaN for zero-vol periods).
+    If no components selected, falls back to b.
+    """
+    score = 1.0
+    used = []
+    for key in FACTOR_KEYS:
+        if not components.get(key):
+            continue
+        val = factors.get(key)
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return np.nan, "skipped (NaN factor)"
+        score *= val
+        used.append(FACTOR_LABELS[key])
+    if not used:
+        return factors["b"], "b (fallback)"
+    return score, " × ".join(used)
+
+
+def build_result_row(factors: dict, components: dict[str, bool]) -> dict:
+    score, _ = apply_formula(factors, components)
+    actual_ret = factors["actual_ret"]
+    if np.isnan(score):
+        pred_dir = "FLAT"
+    else:
+        pred_dir = "UP" if score > 0 else ("DOWN" if score < 0 else "FLAT")
+    actual_dir = "UP" if actual_ret > 0 else ("DOWN" if actual_ret < 0 else "FLAT")
+    match = pred_dir == actual_dir and pred_dir != "FLAT"
+    return {
+        "Ticker": factors["ticker"],
+        "Train Δ%": round(factors["train_total_ret"] * 100, 2),
+        "diff": round(factors["diff"], 4),
+        "r": round(factors["r"], 4),
+        "b": round(factors["b"], 6),
+        "Sharpe": round(factors["sharpe"], 3) if not np.isnan(factors["sharpe"]) else None,
+        "Sortino": round(factors["sortino"], 3) if not np.isnan(factors["sortino"]) else None,
+        "Score": round(score, 6) if not np.isnan(score) else None,
+        "Predicted": pred_dir,
+        "Actual %": round(actual_ret * 100, 2),
+        "Actual": actual_dir,
+        "Match": "✅" if match else "❌",
+    }
+
+
+def summarize(df: pd.DataFrame) -> dict:
+    decisive = df[df["Predicted"] != "FLAT"]
+    correct = int((decisive["Match"] == "✅").sum())
+    accuracy = (correct / len(decisive) * 100) if len(decisive) else 0.0
+    return {
+        "tickers": len(df),
+        "decisive": len(decisive),
+        "correct": correct,
+        "accuracy": accuracy,
+        "avg_actual": float(df["Actual %"].mean()) if len(df) else 0.0,
+    }
+
+
+DEFAULT_FORMULAS = pd.DataFrame([
+    {"Name": "diff×r×b",      "diff": True,  "r": True,  "b": True,  "sharpe": False, "sortino": False},
+    {"Name": "Sharpe only",   "diff": False, "r": False, "b": False, "sharpe": True,  "sortino": False},
+    {"Name": "Sortino only",  "diff": False, "r": False, "b": False, "sharpe": False, "sortino": True},
+    {"Name": "diff×r×b×Sharpe","diff": True,  "r": True,  "b": True,  "sharpe": True,  "sortino": False},
+    {"Name": "all factors",   "diff": True,  "r": True,  "b": True,  "sharpe": True,  "sortino": True},
+])
+
+
+def render_backtest_page():
+    st.title("🔬 Backtest Validator")
+    st.markdown(
+        "Train on an earlier window, test predictions against the recent window. "
+        "Default: train **6→3 months ago**, test **3 months ago → today**. "
+        "Define multiple **score formulas**; each is evaluated against the same factor data, "
+        "so you can compare which formula predicts direction best."
+    )
+
+    today = datetime.date.today()
+
+    st.sidebar.title("⚙️ Backtest Settings")
+    st.sidebar.markdown("**Time Windows**")
+    months_train = st.sidebar.slider("Train window length (months)", 1, 24, 3)
+    months_test = st.sidebar.slider("Test window length (months)", 1, 12, 3)
+    test_start = today - relativedelta(months=months_test)
+    train_start = test_start - relativedelta(months=months_train)
+    st.sidebar.caption(f"Train: **{train_start} → {test_start}**  \nTest: **{test_start} → {today}**")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**ETF / Ticker List**")
+    etf_text = st.sidebar.text_area(
+        "Tickers (comma- or newline-separated)",
+        value=", ".join(DEFAULT_ETF_LIST),
+        height=160,
+    )
+
+    st.sidebar.markdown("---")
+    rf_annual_bt = st.sidebar.number_input(
+        "Risk-Free Rate (annual %)", 0.0, 20.0, 4.5, 0.1, format="%.2f",
+    )
+    rf_daily_bt = (rf_annual_bt / 100) / TRADING_DAYS_PER_YEAR
+
+    run = st.sidebar.button("▶ Run Backtest", type="primary", use_container_width=True)
+
+    st.markdown(
+        f"**Train window:** `{train_start}` → `{test_start}`  &nbsp;&nbsp; "
+        f"**Test window:** `{test_start}` → `{today}`"
+    )
+
+    st.markdown("### 🧪 Score Formulas")
+    st.caption(
+        "Each row defines one formula. Score = product of checked factors. "
+        "Sign of the score → predicted direction (UP / DOWN). "
+        "If a checked factor is NaN for a ticker (e.g. zero downside vol → Sortino NaN), "
+        "the ticker is marked FLAT for that formula. Add/remove rows freely."
+    )
+
+    if "bt_formulas" not in st.session_state:
+        st.session_state.bt_formulas = DEFAULT_FORMULAS.copy()
+
+    formulas_df = st.data_editor(
+        st.session_state.bt_formulas,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Name": st.column_config.TextColumn("Formula Name", required=True),
+            "diff": st.column_config.CheckboxColumn("(ExpReg−Price)"),
+            "r": st.column_config.CheckboxColumn("r"),
+            "b": st.column_config.CheckboxColumn("b"),
+            "sharpe": st.column_config.CheckboxColumn("Sharpe"),
+            "sortino": st.column_config.CheckboxColumn("Sortino"),
+        },
+        key="bt_formulas_editor",
+    )
+
+    if not run:
+        st.info("Configure tickers, windows, and formulas, then click **Run Backtest** in the sidebar.")
+        return
+
+    raw_tickers = [t.strip().upper() for t in etf_text.replace("\n", ",").split(",")]
+    tickers = [t for t in raw_tickers if t]
+    if not tickers:
+        st.error("No tickers provided.")
+        return
+
+    formulas = [
+        {"name": str(row["Name"]).strip() or f"Formula {i+1}",
+         "components": {k: bool(row.get(k, False)) for k in FACTOR_KEYS}}
+        for i, row in formulas_df.iterrows()
+        if str(row.get("Name", "")).strip()
+    ]
+    if not formulas:
+        st.error("Define at least one formula with a name.")
+        return
+
+    factors_list: list[dict] = []
+    failed: list[str] = []
+    progress = st.progress(0.0, text="Fetching data...")
+    for i, tk in enumerate(tickers, start=1):
+        progress.progress(i / len(tickers), text=f"Processing {tk} ({i}/{len(tickers)})")
+        try:
+            f = compute_factors(tk, train_start, test_start, today, rf_daily_bt)
+        except Exception as exc:  # noqa: BLE001
+            f = None
+            failed.append(f"{tk} ({exc.__class__.__name__})")
+        if f is None:
+            if tk not in [s.split(" ")[0] for s in failed]:
+                failed.append(tk)
+            continue
+        factors_list.append(f)
+    progress.empty()
+
+    if not factors_list:
+        st.error("No tickers produced results.")
+        if failed:
+            st.caption("Skipped: " + ", ".join(failed))
+        return
+
+    per_formula: dict[str, pd.DataFrame] = {}
+    summaries: list[dict] = []
+    for fm in formulas:
+        rows = [build_result_row(f, fm["components"]) for f in factors_list]
+        df_f = pd.DataFrame(rows)
+        per_formula[fm["name"]] = df_f
+        s = summarize(df_f)
+        summaries.append({
+            "Formula": fm["name"],
+            "Components": " × ".join(FACTOR_LABELS[k] for k, v in fm["components"].items() if v) or "b (fallback)",
+            "Tickers": s["tickers"],
+            "Decisive": s["decisive"],
+            "Correct": s["correct"],
+            "Accuracy %": round(s["accuracy"], 2),
+            "Avg Actual %": round(s["avg_actual"], 2),
+        })
+
+    summary_df = pd.DataFrame(summaries).sort_values("Accuracy %", ascending=False).reset_index(drop=True)
+
+    st.markdown("### 📊 Formula Comparison")
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    best = summary_df.iloc[0]
+    st.success(
+        f"**Best formula:** `{best['Formula']}` — {best['Accuracy %']}% accuracy "
+        f"({best['Correct']}/{best['Decisive']} decisive predictions correct)."
+    )
+
+    bar = go.Figure()
+    bar.add_trace(go.Bar(
+        x=summary_df["Formula"],
+        y=summary_df["Accuracy %"],
+        text=[f"{a}%" for a in summary_df["Accuracy %"]],
+        textposition="outside",
+        marker_color="#1f77b4",
+    ))
+    bar.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.6,
+                  annotation_text="50% (coin flip)", annotation_position="right")
+    bar.update_layout(
+        title="Accuracy by Formula", height=360,
+        yaxis_title="Accuracy %", xaxis_title="",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    st.plotly_chart(bar, use_container_width=True)
+
+    if failed:
+        with st.expander(f"⚠️ Skipped tickers ({len(failed)})"):
+            st.write(", ".join(failed))
+
+    st.markdown("### 📋 Per-Formula Details")
+    tabs = st.tabs([fm["name"] for fm in formulas])
+    for tab, fm in zip(tabs, formulas):
+        with tab:
+            df_f = per_formula[fm["name"]]
+            s = summarize(df_f)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Tickers", s["tickers"])
+            c2.metric("Correct", f"{s['correct']} / {s['decisive']}")
+            c3.metric("Accuracy", f"{s['accuracy']:.1f}%")
+            c4.metric("Avg Actual %", f"{s['avg_actual']:.2f}%")
+            st.dataframe(df_f, use_container_width=True, hide_index=True)
+
+            scatter = go.Figure()
+            valid = df_f.dropna(subset=["Score"])
+            if len(valid):
+                scatter.add_trace(go.Scatter(
+                    x=valid["Score"], y=valid["Actual %"],
+                    mode="markers+text",
+                    text=valid["Ticker"], textposition="top center",
+                    marker=dict(
+                        size=10,
+                        color=["#2ca02c" if m == "✅" else "#d62728" for m in valid["Match"]],
+                    ),
+                ))
+                scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+                scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+                scatter.update_layout(
+                    xaxis_title=f"Score ({fm['name']})",
+                    yaxis_title="Actual Return %",
+                    height=420, margin=dict(l=40, r=40, t=20, b=40),
+                )
+                st.plotly_chart(scatter, use_container_width=True)
+
+            st.download_button(
+                f"📥 Download CSV — {fm['name']}",
+                df_f.to_csv(index=False).encode("utf-8"),
+                file_name=f"backtest_{fm['name'].replace(' ', '_')}_{today}.csv",
+                mime="text/csv",
+                key=f"dl_{fm['name']}",
+            )
+
+    st.markdown("### 📦 Combined Report")
+    report_lines = [
+        "Backtest Report",
+        "================",
+        f"Generated: {datetime.datetime.now().isoformat(timespec='seconds')}",
+        f"Train window: {train_start} -> {test_start} ({months_train} months)",
+        f"Test window:  {test_start} -> {today} ({months_test} months)",
+        f"Risk-free annual: {rf_annual_bt:.2f}%",
+        f"Tickers attempted: {len(tickers)}, succeeded: {len(factors_list)}",
+        "",
+        "Formula comparison:",
+        summary_df.to_string(index=False),
+        "",
+    ]
+    for fm in formulas:
+        report_lines += [
+            f"--- {fm['name']} ({summaries[[s['Formula'] for s in summaries].index(fm['name'])]['Components']}) ---",
+            per_formula[fm["name"]].to_string(index=False),
+            "",
+        ]
+    report_text = "\n".join(report_lines)
+
+    combined_csv_rows = []
+    for fm in formulas:
+        df_f = per_formula[fm["name"]].copy()
+        df_f.insert(0, "Formula", fm["name"])
+        combined_csv_rows.append(df_f)
+    combined_csv = pd.concat(combined_csv_rows, ignore_index=True)
+
+    cdl1, cdl2, cdl3 = st.columns(3)
+    cdl1.download_button(
+        "📥 Combined CSV",
+        combined_csv.to_csv(index=False).encode("utf-8"),
+        file_name=f"backtest_combined_{today}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    cdl2.download_button(
+        "📊 Summary CSV",
+        summary_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"backtest_summary_{today}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    cdl3.download_button(
+        "📄 Full Report (TXT)",
+        report_text.encode("utf-8"),
+        file_name=f"backtest_report_{today}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
 st.sidebar.title("⚙️ Settings")
+
+page = st.sidebar.radio(
+    "📑 Page",
+    ["📊 Dashboard", "🔬 Backtest Validator"],
+    index=0,
+)
+st.sidebar.markdown("---")
+
+if page == "🔬 Backtest Validator":
+    render_backtest_page()
+    st.stop()
 
 compare_mode = st.sidebar.toggle("Compare Two Stocks", value=False)
 
