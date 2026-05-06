@@ -229,36 +229,36 @@ def calc_exp_regression(prices: pd.Series):
 
 DEFAULT_ETF_LIST = [
     # broad US equity
-    "SPY", "VOO", "IVV", "VTI", "QQQ",
-    "DIA", "IWM", "IJH", "IJR", "VB", "VO",
-    # style / factor
-    "VUG", "VTV", "IWF", "IWD", "MTUM", "QUAL", "VLUE", "USMV", "SPLV", "SPHQ",
-    # dividend / income
-    "SCHD", "VIG", "VYM", "DVY", "NOBL", "HDV", "DGRO",
-    # sectors (SPDR + Vanguard)
+    "SPY", "VOO", "QQQ", "DIA", "IWM", "VTI", "MDY",
+    # factor / style / size
+    "VUG", "VTV", "MTUM", "QUAL", "USMV", "VLUE", "SIZE", "MOAT", "COWZ", "AVUV",
+    "IWY", "IWN", "IWO", "VBR", "VBK", "VOE", "VOT",
+    # dividend / income (equity)
+    "SCHD", "VYM", "NOBL", "DGRO", "JEPI", "JEPQ", "DVY", "VYMI",
+    # SPDR sectors (one per sector)
     "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLU", "XLB", "XLRE", "XLC",
-    "VGT", "VHT", "VFH", "VDE", "VNQ",
-    "SMH", "SOXX", "KRE", "KBE", "ITB", "XHB", "IBB", "XBI",
-    # themes / growth
-    "ARKK", "ARKG", "ARKQ", "ARKW", "ARKF", "ICLN", "TAN", "LIT", "FAN", "BOTZ", "ROBO",
-    # international
-    "EFA", "VEA", "IEFA", "IEMG", "EEM", "VWO", "FXI", "MCHI", "EWJ", "EWZ", "INDA", "EWG", "EWU", "EWY",
-    # bonds
-    "AGG", "BND", "BNDX", "TLT", "IEF", "SHY", "LQD", "HYG", "JNK", "MUB", "TIP",
-    # commodities / gold
-    "GLD", "IAU", "GLDM", "SLV", "USO", "UNG", "DBC", "PDBC",
-    # crypto-related
-    "IBIT", "FBTC", "ETHE", "BITO",
+    # industry / sub-sector (equity-only)
+    "SMH", "SOXX", "KRE", "IAT", "ITB", "IBB", "XBI", "IYT", "JETS", "KIE", "MOO",
+    # themes / innovation (equity)
+    "ARKK", "ARKG", "ARKQ", "ICLN", "TAN", "BOTZ", "DRIV", "BLOK", "AIQ", "ESPO",
+    "WCLD", "FINX", "FDN", "HERO", "IGV", "HACK", "KWEB", "IDRV", "IPO", "KOMP",
+    # international regions
+    "EFA", "EEM", "VWO",
+    # individual country equity
+    "MCHI", "EWJ", "EWZ", "INDA", "EWG", "EWU", "EWY", "EWT",
+    "EWA", "EWC", "EWW", "EZA", "EWQ", "EWP", "EWI", "EWN",
+    "EWL", "EWD", "ECH", "EPOL",
+    # real estate (equity REITs)
+    "VNQ", "REM", "VNQI",
 ]
 
 
-FACTOR_KEYS = ["diff", "r", "b", "sharpe", "sortino"]
+FACTOR_KEYS = ["diff", "r", "b", "sharpe"]
 FACTOR_LABELS = {
     "diff": "(ExpReg − Price)",
     "r": "r",
     "b": "b",
     "sharpe": "Sharpe",
-    "sortino": "Sortino",
 }
 
 
@@ -291,7 +291,6 @@ def compute_factors(
     diff = float(fitted.iloc[-1]) - float(train_prices.iloc[-1])
     train_ret = train_prices.pct_change().dropna()
     sharpe = calc_full_sharpe(train_ret, rf_daily_bt)
-    sortino = calc_full_sortino(train_ret, rf_daily_bt)
     train_total_ret = float(train_prices.iloc[-1] / train_prices.iloc[0] - 1)
     actual_ret = float(test_prices.iloc[-1] / test_prices.iloc[0] - 1)
 
@@ -301,7 +300,6 @@ def compute_factors(
         "r": float(r),
         "b": float(b),
         "sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan,
-        "sortino": float(sortino) if not np.isnan(sortino) else np.nan,
         "train_total_ret": train_total_ret,
         "actual_ret": actual_ret,
     }
@@ -344,7 +342,6 @@ def build_result_row(factors: dict, components: dict[str, bool]) -> dict:
         "r": round(factors["r"], 4),
         "b": round(factors["b"], 6),
         "Sharpe": round(factors["sharpe"], 3) if not np.isnan(factors["sharpe"]) else None,
-        "Sortino": round(factors["sortino"], 3) if not np.isnan(factors["sortino"]) else None,
         "Score": round(score, 6) if not np.isnan(score) else None,
         "Predicted": pred_dir,
         "Actual %": round(actual_ret * 100, 2),
@@ -367,11 +364,10 @@ def summarize(df: pd.DataFrame) -> dict:
 
 
 DEFAULT_FORMULAS = pd.DataFrame([
-    {"Name": "diff×r×b",      "diff": True,  "r": True,  "b": True,  "sharpe": False, "sortino": False},
-    {"Name": "Sharpe only",   "diff": False, "r": False, "b": False, "sharpe": True,  "sortino": False},
-    {"Name": "Sortino only",  "diff": False, "r": False, "b": False, "sharpe": False, "sortino": True},
-    {"Name": "diff×r×b×Sharpe","diff": True,  "r": True,  "b": True,  "sharpe": True,  "sortino": False},
-    {"Name": "all factors",   "diff": True,  "r": True,  "b": True,  "sharpe": True,  "sortino": True},
+    {"Name": "diff×r×b",       "diff": True,  "r": True,  "b": True,  "sharpe": False},
+    {"Name": "Sharpe only",    "diff": False, "r": False, "b": False, "sharpe": True},
+    {"Name": "diff×r×b×Sharpe","diff": True,  "r": True,  "b": True,  "sharpe": True},
+    {"Name": "diff×Sharpe",    "diff": True,  "r": False, "b": False, "sharpe": True},
 ])
 
 
@@ -384,10 +380,92 @@ def render_backtest_page():
         "so you can compare which formula predicts direction best."
     )
 
-    today = datetime.date.today()
+    with st.expander("📐 Variables & formulas — full methodology"):
+        st.markdown(
+            "**Time windows** (anchored at *T* = test-end date)\n"
+            "```\n"
+            "test_start   = T − months_test\n"
+            "train_start  = test_start − months_train\n"
+            "train window = [train_start, test_start)\n"
+            "test  window = [test_start,  T]\n"
+            "```\n"
+            "**Inputs (fetched per ticker via yfinance, auto-adjusted close)**\n"
+            "```\n"
+            "P_train  = closing prices in train window\n"
+            "P_test   = closing prices in test window\n"
+            "R_train  = P_train.pct_change()  # daily simple returns\n"
+            "Rf_daily = Rf_annual / 252       # 252 trading days per year\n"
+            "```\n"
+            "**Exponential regression on train window**: fit `ln(P) = ln(a) + b·t` by `np.polyfit`\n"
+            "```\n"
+            "ExpReg(t) = a · e^(b·t)\n"
+            "r         = corr(t, ln(P_train))             # Pearson, |r| ≤ 1\n"
+            "b         = slope (daily log-growth rate)\n"
+            "diff      = ExpReg(last train day) − P_train(last train day)\n"
+            "```\n"
+            "**Risk-adjusted return on train window**\n"
+            "```\n"
+            "Sharpe = (mean(R_train) − Rf_daily) / std(R_train) × √252\n"
+            "```\n"
+            "**Score** (product of selected factors; factors not chosen are skipped)\n"
+            "```\n"
+            "Score = ∏  factor_i      for factor_i ∈ {diff, r, b, Sharpe} that you check\n"
+            "If a chosen factor is NaN → ticker score is NaN → Predicted = FLAT for that formula.\n"
+            "If no factor is checked   → Score falls back to b (slope sign).\n"
+            "```\n"
+            "**Direction & accuracy** (per ticker, per formula)\n"
+            "```\n"
+            "Predicted   = UP   if Score > 0\n"
+            "              DOWN if Score < 0\n"
+            "              FLAT if Score = 0 / NaN\n"
+            "Actual_pct  = (P_test[last] / P_test[first] − 1) × 100\n"
+            "Actual      = UP / DOWN / FLAT  (sign of Actual_pct)\n"
+            "Match       = (Predicted == Actual) AND (Predicted ≠ FLAT)\n"
+            "Accuracy %  = correct / decisive × 100      # decisive = Predicted ≠ FLAT\n"
+            "```\n"
+            "**Filters (applied per formula tab, live)**\n"
+            "```\n"
+            "Keep if  |r|     ≥  r_threshold\n"
+            "Keep if  |Score| ≥  score_threshold\n"
+            "```\n"
+            "**Portfolio construction** (after filters)\n"
+            "```\n"
+            "ranked      = filtered rows sorted by Score (descending)\n"
+            "longs       = top N by Score\n"
+            "shorts      = bottom N by Score\n"
+            "sides_active = 1 (Long only / Short only) | 2 (Long + Short)\n"
+            "side_usd    = portfolio_usd × (2 / sides_active)\n"
+            "              # one side absorbs the freed capital when the other is removed\n"
+            "Within each active basket:\n"
+            "  Weight(x)        = Score(x) / Σ_{y ∈ basket} |Score(y)|        # Σ|Weight| = 1\n"
+            "  $ Allocation(x)  = |Weight(x)| × side_usd\n"
+            "```\n"
+            "**P&L over the test window**\n"
+            "```\n"
+            "Long P&L $   = Σ_{x ∈ long}   $Allocation(x) × Actual_pct(x) / 100\n"
+            "Short P&L $  = Σ_{x ∈ short}  $Allocation(x) × (−Actual_pct(x)) / 100\n"
+            "                 # short profits when shorted name falls → −actual\n"
+            "Total $ Inv. = Σ $Allocation  (longs + shorts)\n"
+            "Total Return %  = (Long P&L + Short P&L) / Total $ Inv. × 100\n"
+            "```\n"
+            "**Conventions**\n"
+            "- 252 trading days/year for all annualizations.\n"
+            "- All prices come from `yfinance` with `auto_adjust=True` (dividends + splits adjusted).\n"
+            "- A ticker is **skipped** if train < 10 days, test < 5 days, or `b`/`r` cannot be fit (e.g. flat / non-positive prices).\n"
+            "- The portfolio weighting is *score-proportional within basket* — a ticker with twice the |score| of another gets twice the dollars."
+        )
+
+    real_today = datetime.date.today()
 
     st.sidebar.title("⚙️ Backtest Settings")
     st.sidebar.markdown("**Time Windows**")
+    test_end = st.sidebar.date_input(
+        "Test end date",
+        value=real_today,
+        max_value=real_today,
+        help="The last day of the test window. Train+test windows are computed backwards from here.",
+    )
+    today = test_end
     months_train = st.sidebar.slider("Train window length (months)", 1, 24, 3)
     months_test = st.sidebar.slider("Test window length (months)", 1, 12, 3)
     test_start = today - relativedelta(months=months_test)
@@ -437,19 +515,64 @@ def render_backtest_page():
             "r": st.column_config.CheckboxColumn("r"),
             "b": st.column_config.CheckboxColumn("b"),
             "sharpe": st.column_config.CheckboxColumn("Sharpe"),
-            "sortino": st.column_config.CheckboxColumn("Sortino"),
         },
         key="bt_formulas_editor",
     )
 
-    if not run:
+    if run:
+        raw_tickers = [t.strip().upper() for t in etf_text.replace("\n", ",").split(",")]
+        tickers = [t for t in raw_tickers if t]
+        if not tickers:
+            st.error("No tickers provided.")
+            return
+
+        factors_list: list[dict] = []
+        failed: list[str] = []
+        progress = st.progress(0.0, text="Fetching data...")
+        for i, tk in enumerate(tickers, start=1):
+            progress.progress(i / len(tickers), text=f"Processing {tk} ({i}/{len(tickers)})")
+            try:
+                f = compute_factors(tk, train_start, test_start, today, rf_daily_bt)
+            except Exception as exc:  # noqa: BLE001
+                f = None
+                failed.append(f"{tk} ({exc.__class__.__name__})")
+            if f is None:
+                if tk not in [s.split(" ")[0] for s in failed]:
+                    failed.append(tk)
+                continue
+            factors_list.append(f)
+        progress.empty()
+
+        st.session_state.bt_factors_list = factors_list
+        st.session_state.bt_failed = failed
+        st.session_state.bt_run_meta = {
+            "train_start": train_start,
+            "test_start": test_start,
+            "today": today,
+            "months_train": months_train,
+            "months_test": months_test,
+            "rf_annual_bt": rf_annual_bt,
+            "tickers_attempted": len(tickers),
+        }
+
+    if "bt_factors_list" not in st.session_state:
         st.info("Configure tickers, windows, and formulas, then click **Run Backtest** in the sidebar.")
         return
 
-    raw_tickers = [t.strip().upper() for t in etf_text.replace("\n", ",").split(",")]
-    tickers = [t for t in raw_tickers if t]
-    if not tickers:
-        st.error("No tickers provided.")
+    factors_list = st.session_state.bt_factors_list
+    failed = st.session_state.bt_failed
+    meta = st.session_state.bt_run_meta
+    today = meta["today"]
+    train_start = meta["train_start"]
+    test_start = meta["test_start"]
+    months_train = meta["months_train"]
+    months_test = meta["months_test"]
+    rf_annual_bt = meta["rf_annual_bt"]
+
+    if not factors_list:
+        st.error("No tickers produced results.")
+        if failed:
+            st.caption("Skipped: " + ", ".join(failed))
         return
 
     formulas = [
@@ -460,29 +583,6 @@ def render_backtest_page():
     ]
     if not formulas:
         st.error("Define at least one formula with a name.")
-        return
-
-    factors_list: list[dict] = []
-    failed: list[str] = []
-    progress = st.progress(0.0, text="Fetching data...")
-    for i, tk in enumerate(tickers, start=1):
-        progress.progress(i / len(tickers), text=f"Processing {tk} ({i}/{len(tickers)})")
-        try:
-            f = compute_factors(tk, train_start, test_start, today, rf_daily_bt)
-        except Exception as exc:  # noqa: BLE001
-            f = None
-            failed.append(f"{tk} ({exc.__class__.__name__})")
-        if f is None:
-            if tk not in [s.split(" ")[0] for s in failed]:
-                failed.append(tk)
-            continue
-        factors_list.append(f)
-    progress.empty()
-
-    if not factors_list:
-        st.error("No tickers produced results.")
-        if failed:
-            st.caption("Skipped: " + ", ".join(failed))
         return
 
     per_formula: dict[str, pd.DataFrame] = {}
@@ -535,21 +635,97 @@ def render_backtest_page():
             st.write(", ".join(failed))
 
     st.markdown("### 📋 Per-Formula Details")
+    portfolios_compare: dict[str, dict] = {}
     tabs = st.tabs([fm["name"] for fm in formulas])
     for tab, fm in zip(tabs, formulas):
         with tab:
             df_f = per_formula[fm["name"]]
-            s = summarize(df_f)
+            fname = fm["name"]
+            safe_key = fname.replace(" ", "_").replace("×", "x")
+
+            sides = st.radio(
+                "Portfolio sides",
+                ["Long + Short", "Long only", "Short only"],
+                horizontal=True,
+                key=f"sides_{safe_key}",
+            )
+            include_long = sides in ("Long + Short", "Long only")
+            include_short = sides in ("Long + Short", "Short only")
+
+            abs_r = df_f["r"].abs()
+            r_abs_min = float(abs_r.min())
+            r_abs_max = float(abs_r.max())
+            ctc1, ctc2, ctc3, ctc4 = st.columns([2, 2, 1, 1])
+            if r_abs_min == r_abs_max:
+                r_thresh = r_abs_min
+                ctc1.caption(f"All tickers have |r| = {r_abs_min:.4f} — no |r| filter.")
+            else:
+                r_thresh = ctc1.slider(
+                    "Pearson |r| threshold (keep |r| ≥ …)",
+                    min_value=round(r_abs_min, 4),
+                    max_value=round(r_abs_max, 4),
+                    value=round(r_abs_min, 4),
+                    step=0.001,
+                    format="%.4f",
+                    key=f"thresh_{safe_key}",
+                )
+            df_after_r = df_f[df_f["r"].abs() >= r_thresh].copy()
+
+            score_series = df_after_r["Score"].dropna() if not df_after_r.empty else pd.Series([], dtype=float)
+            abs_score = score_series.abs() if not score_series.empty else pd.Series([], dtype=float)
+            if len(abs_score) == 0:
+                s_thresh = 0.0
+                ctc2.caption("No scores after |r| filter — |Score| filter disabled.")
+            else:
+                s_min = float(abs_score.min())
+                s_max = float(abs_score.max())
+                if s_min == s_max:
+                    s_thresh = s_min
+                    ctc2.caption(f"All |Score| = {s_min:.4g} — no |Score| filter.")
+                else:
+                    s_thresh = ctc2.slider(
+                        "|Score| threshold (keep |Score| ≥ …)",
+                        min_value=float(round(s_min, 6)),
+                        max_value=float(round(s_max, 6)),
+                        value=float(round(s_min, 6)),
+                        step=float((s_max - s_min) / 100.0) if s_max > s_min else 1e-6,
+                        format="%.6g",
+                        key=f"sthresh_{safe_key}",
+                    )
+
+            top_n = ctc3.number_input(
+                "Top / bottom N",
+                min_value=1, max_value=50, value=10, step=1,
+                key=f"topn_{safe_key}",
+            )
+            portfolio_usd = ctc4.number_input(
+                "Portfolio $ (per side)",
+                min_value=10.0, max_value=1_000_000.0, value=1000.0, step=100.0,
+                key=f"usd_{safe_key}",
+            )
+
+            df_filt = df_after_r[df_after_r["Score"].abs() >= s_thresh].copy()
+            removed_r = len(df_f) - len(df_after_r)
+            removed_s = len(df_after_r) - len(df_filt)
+            parts = []
+            if removed_r:
+                parts.append(f"|r| ≥ {r_thresh:.4f} removed **{removed_r}**")
+            if removed_s:
+                parts.append(f"|Score| ≥ {s_thresh:.6g} removed **{removed_s}**")
+            if parts:
+                st.caption(" · ".join(parts) + f" · **{len(df_filt)}** remain.")
+
+            s = summarize(df_filt)
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Tickers", s["tickers"])
+            c1.metric("Tickers (after filter)", s["tickers"])
             c2.metric("Correct", f"{s['correct']} / {s['decisive']}")
             c3.metric("Accuracy", f"{s['accuracy']:.1f}%")
             c4.metric("Avg Actual %", f"{s['avg_actual']:.2f}%")
-            st.dataframe(df_f, use_container_width=True, hide_index=True)
+            st.dataframe(df_filt, use_container_width=True, hide_index=True)
 
-            scatter = go.Figure()
-            valid = df_f.dropna(subset=["Score"])
+            valid = df_filt.dropna(subset=["Score"])
             if len(valid):
+                scatter = go.Figure()
                 scatter.add_trace(go.Scatter(
                     x=valid["Score"], y=valid["Actual %"],
                     mode="markers+text",
@@ -562,19 +738,225 @@ def render_backtest_page():
                 scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
                 scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
                 scatter.update_layout(
-                    xaxis_title=f"Score ({fm['name']})",
+                    xaxis_title=f"Score ({fname})",
                     yaxis_title="Actual Return %",
                     height=420, margin=dict(l=40, r=40, t=20, b=40),
                 )
                 st.plotly_chart(scatter, use_container_width=True)
 
-            st.download_button(
-                f"📥 Download CSV — {fm['name']}",
-                df_f.to_csv(index=False).encode("utf-8"),
-                file_name=f"backtest_{fm['name'].replace(' ', '_')}_{today}.csv",
-                mime="text/csv",
-                key=f"dl_{fm['name']}",
+            st.markdown("#### 💼 Portfolio Construction")
+            st.caption(
+                "Top **N** scores → **long** basket. Bottom **N** scores → **short** basket. "
+                "Within each basket, weight(x) = score(x) / Σ |score(x)| (over basket). "
+                f"${portfolio_usd:.0f} allocated per side."
             )
+
+            ranked = valid.sort_values("Score", ascending=False).reset_index(drop=True)
+            n = int(top_n)
+            longs = ranked.head(n).copy()
+            shorts = ranked.tail(n).copy() if len(ranked) > n else ranked.iloc[0:0].copy()
+
+            sides_active = (1 if include_long else 0) + (1 if include_short else 0)
+            side_usd = portfolio_usd * (2 / sides_active) if sides_active > 0 else portfolio_usd
+
+            def build_basket(basket: pd.DataFrame, label: str) -> pd.DataFrame:
+                if basket.empty:
+                    return basket
+                abs_sum = basket["Score"].abs().sum()
+                if abs_sum == 0:
+                    basket = basket.assign(Weight=0.0, **{"$ Allocation": 0.0})
+                else:
+                    basket = basket.assign(
+                        Weight=(basket["Score"] / abs_sum).round(4),
+                    )
+                    basket["$ Allocation"] = (basket["Weight"].abs() * side_usd).round(2)
+                return basket[["Ticker", "Score", "r", "Predicted", "Actual %", "Match", "Weight", "$ Allocation"]]
+
+            empty_pf = pd.DataFrame(columns=[
+                "Ticker", "Score", "r", "Predicted", "Actual %", "Match", "Weight", "$ Allocation",
+            ])
+            long_pf = build_basket(longs, "long") if include_long else empty_pf.copy()
+            short_pf = build_basket(shorts, "short") if include_short else empty_pf.copy()
+            if not include_long or not include_short:
+                kept = "long" if include_long else "short"
+                st.caption(
+                    f"Sides = **{sides}**. The {kept} basket absorbs the freed capital → "
+                    f"deployed = **${side_usd:.0f}** (2 × per-side input). "
+                    f"Weights = score / Σ|score| over the {kept} basket; Σ|Weight| = 1."
+                )
+
+            pcol1, pcol2 = st.columns(2)
+            with pcol1:
+                st.markdown(f"**🟢 LONG basket — {len(long_pf)} positions**")
+                if not long_pf.empty:
+                    neg_in_long = (long_pf["Score"] < 0).sum()
+                    if neg_in_long:
+                        st.warning(f"{neg_in_long} long(s) have negative score — too few tickers passed the filter.")
+                    st.dataframe(long_pf, use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"Σ Weight = {long_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
+                        f"Σ $ = ${long_pf['$ Allocation'].sum():.2f}"
+                    )
+                else:
+                    st.info("No long positions.")
+            with pcol2:
+                st.markdown(f"**🔴 SHORT basket — {len(short_pf)} positions**")
+                if not short_pf.empty:
+                    pos_in_short = (short_pf["Score"] > 0).sum()
+                    if pos_in_short:
+                        st.warning(f"{pos_in_short} short(s) have positive score — too few tickers passed the filter.")
+                    st.dataframe(short_pf, use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"Σ Weight = {short_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
+                        f"Σ $ = ${short_pf['$ Allocation'].sum():.2f}"
+                    )
+                else:
+                    st.info("No short positions.")
+
+            tab_long_pnl = float((long_pf["$ Allocation"] * long_pf["Actual %"] / 100).sum()) if not long_pf.empty else 0.0
+            tab_short_pnl = float((short_pf["$ Allocation"] * (-short_pf["Actual %"]) / 100).sum()) if not short_pf.empty else 0.0
+            tab_long_inv = float(long_pf["$ Allocation"].sum()) if not long_pf.empty else 0.0
+            tab_short_inv = float(short_pf["$ Allocation"].sum()) if not short_pf.empty else 0.0
+            tab_total_inv = tab_long_inv + tab_short_inv
+            tab_total_pnl = tab_long_pnl + tab_short_pnl
+            tab_ret = (tab_total_pnl / tab_total_inv * 100) if tab_total_inv > 0 else 0.0
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("💰 Total Deployed $", f"${tab_total_inv:,.0f}")
+            mc2.metric("Long P&L $", f"${tab_long_pnl:+,.2f}")
+            mc3.metric("Short P&L $", f"${tab_short_pnl:+,.2f}")
+            mc4.metric("📈 Total Return %", f"{tab_ret:+.2f}%", delta=f"${tab_total_pnl:+.2f}")
+
+            if not long_pf.empty or not short_pf.empty:
+                portfolio_df = pd.concat([
+                    long_pf.assign(Side="LONG"),
+                    short_pf.assign(Side="SHORT"),
+                ], ignore_index=True)
+                cols_order = ["Side", "Ticker", "Score", "r", "Predicted", "Actual %", "Match", "Weight", "$ Allocation"]
+                portfolio_df = portfolio_df[cols_order]
+                st.download_button(
+                    f"📥 Portfolio CSV — {fname}",
+                    portfolio_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"portfolio_{safe_key}_{today}.csv",
+                    mime="text/csv",
+                    key=f"dl_pf_{safe_key}",
+                )
+
+            st.download_button(
+                f"📥 Filtered results CSV — {fname}",
+                df_filt.to_csv(index=False).encode("utf-8"),
+                file_name=f"backtest_{safe_key}_{today}.csv",
+                mime="text/csv",
+                key=f"dl_{safe_key}",
+            )
+
+            portfolios_compare[fname] = {
+                "long": long_pf,
+                "short": short_pf,
+                "portfolio_usd": float(portfolio_usd),
+                "r_thresh": float(r_thresh),
+                "s_thresh": float(s_thresh),
+                "top_n": int(top_n),
+            }
+
+    st.markdown("### 🏁 Portfolio Comparison — Test-Window Returns")
+    st.caption(
+        "Each formula's portfolio is evaluated against the actual test-window returns. "
+        "Long P&L = Σ |weight| × $ × actual_return.  "
+        "Short P&L = Σ |weight| × $ × (−actual_return).  "
+        "Total $ deployed per formula = 2 × (Portfolio $ per side)."
+    )
+
+    pf_rows: list[dict] = []
+    equity_curves: dict[str, dict] = {}
+    for fname, pf in portfolios_compare.items():
+        long_pf = pf["long"]
+        short_pf = pf["short"]
+
+        long_pnl = float((long_pf["$ Allocation"] * long_pf["Actual %"] / 100).sum()) if not long_pf.empty else 0.0
+        short_pnl = float((short_pf["$ Allocation"] * (-short_pf["Actual %"]) / 100).sum()) if not short_pf.empty else 0.0
+        long_invested = float(long_pf["$ Allocation"].sum()) if not long_pf.empty else 0.0
+        short_invested = float(short_pf["$ Allocation"].sum()) if not short_pf.empty else 0.0
+        total_invested = long_invested + short_invested
+        total_pnl = long_pnl + short_pnl
+        ret_pct = (total_pnl / total_invested * 100) if total_invested > 0 else 0.0
+        long_ret_pct = (long_pnl / long_invested * 100) if long_invested > 0 else 0.0
+        short_ret_pct = (short_pnl / short_invested * 100) if short_invested > 0 else 0.0
+
+        pf_rows.append({
+            "Formula": fname,
+            "Longs": len(long_pf),
+            "Shorts": len(short_pf),
+            "Long $": round(long_invested, 2),
+            "Short $": round(short_invested, 2),
+            "Long P&L $": round(long_pnl, 2),
+            "Short P&L $": round(short_pnl, 2),
+            "Long Return %": round(long_ret_pct, 2),
+            "Short Return %": round(short_ret_pct, 2),
+            "Total P&L $": round(total_pnl, 2),
+            "Total Return %": round(ret_pct, 2),
+        })
+
+        equity_curves[fname] = {
+            "long_pnl": long_pnl,
+            "short_pnl": short_pnl,
+            "total_pnl": total_pnl,
+            "total_return": ret_pct,
+        }
+
+    pf_compare_df = pd.DataFrame(pf_rows).sort_values("Total Return %", ascending=False).reset_index(drop=True)
+
+    if not pf_compare_df.empty:
+        best_pf = pf_compare_df.iloc[0]
+        worst_pf = pf_compare_df.iloc[-1]
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("🏆 Best Formula", best_pf["Formula"], f"{best_pf['Total Return %']:.2f}%")
+        mc2.metric("📉 Worst Formula", worst_pf["Formula"], f"{worst_pf['Total Return %']:.2f}%")
+        mc3.metric("Spread", f"{best_pf['Total Return %'] - worst_pf['Total Return %']:.2f} pp")
+
+        st.dataframe(pf_compare_df, use_container_width=True, hide_index=True)
+
+        bar_pf = go.Figure()
+        bar_pf.add_trace(go.Bar(
+            name="Long P&L",
+            x=pf_compare_df["Formula"], y=pf_compare_df["Long P&L $"],
+            marker_color="#2ca02c",
+        ))
+        bar_pf.add_trace(go.Bar(
+            name="Short P&L",
+            x=pf_compare_df["Formula"], y=pf_compare_df["Short P&L $"],
+            marker_color="#d62728",
+        ))
+        bar_pf.update_layout(
+            barmode="relative",
+            title="Long / Short P&L by Formula ($)",
+            yaxis_title="P&L $", xaxis_title="",
+            height=380, margin=dict(l=40, r=40, t=60, b=40),
+        )
+        st.plotly_chart(bar_pf, use_container_width=True)
+
+        bar_ret = go.Figure()
+        colors = ["#2ca02c" if v >= 0 else "#d62728" for v in pf_compare_df["Total Return %"]]
+        bar_ret.add_trace(go.Bar(
+            x=pf_compare_df["Formula"], y=pf_compare_df["Total Return %"],
+            marker_color=colors,
+            text=[f"{v:.2f}%" for v in pf_compare_df["Total Return %"]],
+            textposition="outside",
+        ))
+        bar_ret.add_hline(y=0, line_color="gray", opacity=0.6)
+        bar_ret.update_layout(
+            title="Total Return % by Formula",
+            yaxis_title="Return %", xaxis_title="",
+            height=380, margin=dict(l=40, r=40, t=60, b=40),
+        )
+        st.plotly_chart(bar_ret, use_container_width=True)
+
+        st.download_button(
+            "📥 Portfolio Comparison CSV",
+            pf_compare_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"portfolio_comparison_{today}.csv",
+            mime="text/csv",
+            key="dl_pf_compare",
+        )
 
     st.markdown("### 📦 Combined Report")
     report_lines = [
@@ -584,7 +966,7 @@ def render_backtest_page():
         f"Train window: {train_start} -> {test_start} ({months_train} months)",
         f"Test window:  {test_start} -> {today} ({months_test} months)",
         f"Risk-free annual: {rf_annual_bt:.2f}%",
-        f"Tickers attempted: {len(tickers)}, succeeded: {len(factors_list)}",
+        f"Tickers attempted: {meta['tickers_attempted']}, succeeded: {len(factors_list)}",
         "",
         "Formula comparison:",
         summary_df.to_string(index=False),

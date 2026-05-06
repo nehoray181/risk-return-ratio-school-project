@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "risk-return-backtest": {
+      "command": "/Users/tdfthole/School Project/risk-return-ratio-school-project/.venv/bin/python",
+      "args": ["/Users/tdfthole/School Project/risk-return-ratio-school-project/mcp_server.py"]
+    }
+  }
+}
