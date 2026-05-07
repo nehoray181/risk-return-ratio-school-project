@@ -584,6 +584,7 @@ def render_backtest_page():
             "today": today,
             "months_train": months_train,
             "months_test": months_test,
+            "unit": unit,
             "rf_annual_bt": rf_annual_bt,
             "tickers_attempted": len(tickers),
         }
