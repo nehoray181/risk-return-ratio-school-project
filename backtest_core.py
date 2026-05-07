@@ -77,7 +77,7 @@ def compute_factors(
     split_ts = pd.Timestamp(test_start)
     train_prices = prices_all[prices_all.index < split_ts]
     test_prices = prices_all[prices_all.index >= split_ts]
-    if len(train_prices) < 10 or len(test_prices) < 5:
+    if len(train_prices) < 5 or len(test_prices) < 2:
         return None
     _, b, r, fitted = calc_exp_regression(train_prices)
     if fitted is None or np.isnan(b) or np.isnan(r):
