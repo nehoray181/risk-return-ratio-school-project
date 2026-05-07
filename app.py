@@ -466,11 +466,44 @@ def render_backtest_page():
         help="The last day of the test window. Train+test windows are computed backwards from here.",
     )
     today = test_end
-    months_train = st.sidebar.slider("Train window length (months)", 1, 24, 3)
-    months_test = st.sidebar.slider("Test window length (months)", 1, 12, 3)
-    test_start = today - relativedelta(months=months_test)
-    train_start = test_start - relativedelta(months=months_train)
-    st.sidebar.caption(f"Train: **{train_start} → {test_start}**  \nTest: **{test_start} → {today}**")
+
+    unit = st.sidebar.selectbox(
+        "Window unit",
+        ["months", "weeks", "days"],
+        index=0,
+        help="Granularity for train/test window lengths. Use weeks/days for short-term signals.",
+    )
+    if unit == "months":
+        months_train = st.sidebar.slider("Train window (months)", 1, 24, 3)
+        months_test = st.sidebar.slider("Test window (months)", 1, 12, 3)
+        train_delta = relativedelta(months=months_train)
+        test_delta = relativedelta(months=months_test)
+        unit_train = months_train
+        unit_test = months_test
+    elif unit == "weeks":
+        weeks_train = st.sidebar.slider("Train window (weeks)", 1, 52, 8)
+        weeks_test = st.sidebar.slider("Test window (weeks)", 1, 26, 4)
+        train_delta = datetime.timedelta(weeks=weeks_train)
+        test_delta = datetime.timedelta(weeks=weeks_test)
+        unit_train = weeks_train
+        unit_test = weeks_test
+    else:  # days
+        days_train = st.sidebar.slider("Train window (days)", 5, 180, 30)
+        days_test = st.sidebar.slider("Test window (days)", 2, 90, 14)
+        train_delta = datetime.timedelta(days=days_train)
+        test_delta = datetime.timedelta(days=days_test)
+        unit_train = days_train
+        unit_test = days_test
+
+    test_start = today - test_delta
+    train_start = test_start - train_delta
+    months_train = unit_train  # alias kept for downstream meta/report
+    months_test = unit_test
+    st.sidebar.caption(
+        f"Train: **{train_start} → {test_start}**  \n"
+        f"Test: **{test_start} → {today}**  \n"
+        f"Unit: **{unit}** · train {unit_train} · test {unit_test}"
+    )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**ETF / Ticker List**")
@@ -745,9 +778,31 @@ def render_backtest_page():
                 st.plotly_chart(scatter, use_container_width=True)
 
             st.markdown("#### 💼 Portfolio Construction")
+
+            ac1, ac2, ac3 = st.columns([2, 1, 1])
+            alloc_method = ac1.radio(
+                "Allocation method",
+                ["Score-proportional (default)", "Confidence-weighted (|Score| × r²)"],
+                horizontal=True,
+                key=f"alloc_{safe_key}",
+                help="Score-proportional = current behavior. Confidence-weighted scales each weight by r² (variance explained by trend) — pushes capital toward names with cleaner regression fits.",
+            )
+            max_cap = ac2.slider(
+                "Max weight cap (per name)",
+                min_value=0.05, max_value=1.0, value=1.0, step=0.05,
+                key=f"cap_{safe_key}",
+                help="Cap any single position at this fraction of basket. 1.0 = no cap. 0.20 = no name > 20% of side. Excess is redistributed proportionally to non-capped names.",
+            )
+            strict_short = ac3.checkbox(
+                "Strict short gate",
+                value=True,
+                key=f"strict_short_{safe_key}",
+                help="Require r < 0 AND b < 0 for short eligibility. Filters out 'overbought uptrend' false signals — only true downtrends survive.",
+            )
+
             st.caption(
-                "Top **N** scores → **long** basket. Bottom **N** scores → **short** basket. "
-                "Within each basket, weight(x) = score(x) / Σ |score(x)| (over basket). "
+                f"Top **N** scores → **long** basket. Bottom **N** scores → **short** basket. "
+                f"Method: **{alloc_method}**. Cap: **{max_cap:.0%}** per name. "
                 f"${portfolio_usd:.0f} allocated per side."
             )
 
@@ -758,18 +813,64 @@ def render_backtest_page():
 
             sides_active = (1 if include_long else 0) + (1 if include_short else 0)
             side_usd = portfolio_usd * (2 / sides_active) if sides_active > 0 else portfolio_usd
+            use_confidence = alloc_method.startswith("Confidence")
+
+            def _apply_cap(weights: pd.Series, cap: float) -> pd.Series:
+                """Iteratively cap weights at `cap` and redistribute excess to under-capped names."""
+                if cap >= 1.0:
+                    return weights
+                w = weights.copy().astype(float)
+                for _ in range(50):
+                    over = w > cap + 1e-12
+                    if not over.any():
+                        break
+                    excess = float((w[over] - cap).sum())
+                    w[over] = cap
+                    under_mask = (~over) & (w > 0) & (w < cap - 1e-12)
+                    under_sum = float(w[under_mask].sum())
+                    if under_sum <= 0:
+                        # nowhere to redistribute — leave the residual unallocated
+                        break
+                    w[under_mask] = w[under_mask] + excess * w[under_mask] / under_sum
+                return w
 
             def build_basket(basket: pd.DataFrame, label: str) -> pd.DataFrame:
+                """Weight over rows whose predicted direction matches the basket side.
+
+                Direction filter: a long position needs Score > 0, a short needs Score < 0;
+                wrong-sign rows get 0 weight. Surviving names redistribute the side's dollars.
+
+                Method:
+                  - Score-proportional: weight ∝ |Score|
+                  - Confidence-weighted: weight ∝ |Score| × r²
+                Then a per-name cap is applied iteratively (excess redistributed proportionally).
+                """
                 if basket.empty:
                     return basket
-                abs_sum = basket["Score"].abs().sum()
-                if abs_sum == 0:
-                    basket = basket.assign(Weight=0.0, **{"$ Allocation": 0.0})
+                if label == "long":
+                    eligible = basket["Score"] > 0
+                elif label == "short":
+                    eligible = basket["Score"] < 0
+                    if strict_short:
+                        eligible = eligible & (basket["r"] < 0) & (basket["b"] < 0)
                 else:
-                    basket = basket.assign(
-                        Weight=(basket["Score"] / abs_sum).round(4),
-                    )
-                    basket["$ Allocation"] = (basket["Weight"].abs() * side_usd).round(2)
+                    eligible = pd.Series(True, index=basket.index)
+
+                raw = basket["Score"].abs().astype(float)
+                if use_confidence:
+                    raw = raw * (basket["r"].astype(float) ** 2)
+                raw = raw * eligible.astype(float)
+
+                abs_sum = float(raw.sum())
+                if abs_sum == 0:
+                    return basket.assign(Weight=0.0, **{"$ Allocation": 0.0})[
+                        ["Ticker", "Score", "r", "Predicted", "Actual %", "Match", "Weight", "$ Allocation"]
+                    ]
+
+                w = raw / abs_sum
+                w = _apply_cap(w, max_cap)
+                basket = basket.assign(Weight=w.round(4))
+                basket["$ Allocation"] = (basket["Weight"] * side_usd).round(2)
                 return basket[["Ticker", "Score", "r", "Predicted", "Actual %", "Match", "Weight", "$ Allocation"]]
 
             empty_pf = pd.DataFrame(columns=[
@@ -789,9 +890,9 @@ def render_backtest_page():
             with pcol1:
                 st.markdown(f"**🟢 LONG basket — {len(long_pf)} positions**")
                 if not long_pf.empty:
-                    neg_in_long = (long_pf["Score"] < 0).sum()
-                    if neg_in_long:
-                        st.warning(f"{neg_in_long} long(s) have negative score — too few tickers passed the filter.")
+                    zeroed = int((long_pf["Weight"] == 0).sum())
+                    if zeroed:
+                        st.caption(f"⚠️ {zeroed} long(s) had Score ≤ 0 (predicted DOWN/FLAT) → weight set to 0; remaining longs absorb the dollars.")
                     st.dataframe(long_pf, use_container_width=True, hide_index=True)
                     st.caption(
                         f"Σ Weight = {long_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
@@ -802,9 +903,9 @@ def render_backtest_page():
             with pcol2:
                 st.markdown(f"**🔴 SHORT basket — {len(short_pf)} positions**")
                 if not short_pf.empty:
-                    pos_in_short = (short_pf["Score"] > 0).sum()
-                    if pos_in_short:
-                        st.warning(f"{pos_in_short} short(s) have positive score — too few tickers passed the filter.")
+                    zeroed = int((short_pf["Weight"] == 0).sum())
+                    if zeroed:
+                        st.caption(f"⚠️ {zeroed} short(s) had Score ≥ 0 (predicted UP/FLAT) → weight set to 0; remaining shorts absorb the dollars.")
                     st.dataframe(short_pf, use_container_width=True, hide_index=True)
                     st.caption(
                         f"Σ Weight = {short_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
@@ -825,6 +926,105 @@ def render_backtest_page():
             mc2.metric("Long P&L $", f"${tab_long_pnl:+,.2f}")
             mc3.metric("Short P&L $", f"${tab_short_pnl:+,.2f}")
             mc4.metric("📈 Total Return %", f"{tab_ret:+.2f}%", delta=f"${tab_total_pnl:+.2f}")
+
+            # ── ideal (hindsight) weights ─────────────────────────────────
+            def ideal_basket(basket: pd.DataFrame, is_long: bool, deployed_usd: float) -> pd.DataFrame:
+                """Recompute weights using actual realized returns (hindsight).
+
+                Long: profitable = Actual % > 0.   Short: profitable = Actual % < 0 (so −Actual > 0).
+                Ideal weight ∝ max(0, side_profit). Names that lost money ideally get 0 weight.
+                """
+                if basket.empty:
+                    return basket
+                profit_pct = basket["Actual %"] if is_long else -basket["Actual %"]
+                profit_pos = profit_pct.clip(lower=0)
+                tot = float(profit_pos.sum())
+                if tot == 0:
+                    ideal_w = pd.Series(0.0, index=basket.index)
+                else:
+                    ideal_w = profit_pos / tot
+                ideal_alloc = ideal_w * deployed_usd
+                ideal_pnl = ideal_alloc * profit_pct / 100
+                # realized $ for original allocation under same side semantics
+                actual_pnl = basket["$ Allocation"] * profit_pct / 100
+                # |Δw| from current to ideal
+                weight_dev = (basket["Weight"].abs() - ideal_w).abs()
+                return basket.assign(
+                    **{
+                        "Ideal Weight": ideal_w.round(4),
+                        "Ideal $": ideal_alloc.round(2),
+                        "Ideal P&L $": ideal_pnl.round(2),
+                        "Realized P&L $": actual_pnl.round(2),
+                        "|Δ Weight|": weight_dev.round(4),
+                    }
+                )
+
+            long_ideal = ideal_basket(long_pf, True, tab_long_inv)
+            short_ideal = ideal_basket(short_pf, False, tab_short_inv)
+
+            ideal_long_pnl = float(long_ideal["Ideal P&L $"].sum()) if not long_ideal.empty else 0.0
+            ideal_short_pnl = float(short_ideal["Ideal P&L $"].sum()) if not short_ideal.empty else 0.0
+            ideal_total_pnl = ideal_long_pnl + ideal_short_pnl
+            ideal_ret = (ideal_total_pnl / tab_total_inv * 100) if tab_total_inv > 0 else 0.0
+            missed = ideal_total_pnl - tab_total_pnl
+            total_dev = 0.0
+            if not long_ideal.empty:
+                total_dev += float(long_ideal["|Δ Weight|"].sum())
+            if not short_ideal.empty:
+                total_dev += float(short_ideal["|Δ Weight|"].sum())
+
+            with st.expander("🎯 Hindsight: ideal weights based on realized returns", expanded=False):
+                st.caption(
+                    "Reweights only the names already in your basket so the most-profitable names get the most $. "
+                    "**Long**: ideal w(x) ∝ max(0, Actual %).  "
+                    "**Short**: ideal w(x) ∝ max(0, −Actual %). "
+                    "Weights for names that lost money are zeroed (ideally we wouldn't have funded them). "
+                    "Σ Ideal Weight = 1 per basket; Ideal $ = Ideal Weight × deployed $."
+                )
+
+                im1, im2, im3, im4 = st.columns(4)
+                im1.metric("🎯 Ideal P&L $", f"${ideal_total_pnl:+,.2f}")
+                im2.metric("📈 Ideal Return %", f"{ideal_ret:+.2f}%")
+                im3.metric("💸 Missed gain $", f"${missed:+,.2f}",
+                           delta=f"vs realized ${tab_total_pnl:+,.2f}")
+                im4.metric("Σ |Δ Weight|", f"{total_dev:.3f}",
+                           help="Sum of absolute weight deviations from ideal across all positions. 0 = perfect; 2 = maximally wrong (one basket).")
+
+                ic1, ic2 = st.columns(2)
+                with ic1:
+                    st.markdown("**🟢 LONG — original vs ideal**")
+                    if not long_ideal.empty:
+                        cols = ["Ticker", "Actual %", "Weight", "Ideal Weight", "$ Allocation", "Ideal $",
+                                "Realized P&L $", "Ideal P&L $", "|Δ Weight|"]
+                        st.dataframe(long_ideal[cols], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No long positions.")
+                with ic2:
+                    st.markdown("**🔴 SHORT — original vs ideal**")
+                    if not short_ideal.empty:
+                        cols = ["Ticker", "Actual %", "Weight", "Ideal Weight", "$ Allocation", "Ideal $",
+                                "Realized P&L $", "Ideal P&L $", "|Δ Weight|"]
+                        st.dataframe(short_ideal[cols], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No short positions.")
+
+                if not long_ideal.empty or not short_ideal.empty:
+                    parts = []
+                    if not long_ideal.empty:
+                        parts.append(long_ideal.assign(Side="LONG"))
+                    if not short_ideal.empty:
+                        parts.append(short_ideal.assign(Side="SHORT"))
+                    ideal_full = pd.concat(parts, ignore_index=True)
+                    cols_dl = ["Side", "Ticker", "Actual %", "Weight", "Ideal Weight", "$ Allocation", "Ideal $",
+                               "Realized P&L $", "Ideal P&L $", "|Δ Weight|"]
+                    ideal_full = ideal_full[cols_dl]
+                    st.download_button(
+                        f"📥 Hindsight CSV — {fname}",
+                        ideal_full.to_csv(index=False).encode("utf-8"),
+                        file_name=f"hindsight_{safe_key}_{today}.csv",
+                        mime="text/csv",
+                        key=f"dl_ideal_{safe_key}",
+                    )
 
             if not long_pf.empty or not short_pf.empty:
                 portfolio_df = pd.concat([
@@ -1011,19 +1211,340 @@ def render_backtest_page():
     )
 
 
+# ── multi-window backtest ────────────────────────────────────────────────────
+
+def render_multiwindow_page():
+    st.title("🔄 Multi-Window Backtest")
+    st.markdown(
+        "Asymmetric windows: a single **long** position is held across the long-test span, "
+        "while **shorts** are rebalanced in rolling intervals (each with its own train + test) "
+        "inside the same span. Designed to capture long-horizon momentum with longs while harvesting "
+        "short-horizon reversals via shorts."
+    )
+
+    with st.expander("📐 How this works"):
+        st.markdown(
+            "**Long side**: train and test windows derived from `T = test end date`.\n"
+            "```\n"
+            "long_test_end   = T\n"
+            "long_test_start = T − long_test_months\n"
+            "long_train_end  = long_test_start\n"
+            "long_train_start= long_train_end − long_train_months\n"
+            "```\n"
+            "Top-N by score in `long_train` are held LONG for the whole `long_test` window.\n\n"
+            "**Short side**: rolling intervals of length `short_test_months` filling `long_test`.\n"
+            "```\n"
+            "for i in 0 .. floor(long_test / short_test) − 1:\n"
+            "  short_test_start[i] = long_test_start + i × short_test_months\n"
+            "  short_test_end[i]   = short_test_start[i] + short_test_months\n"
+            "  short_train_start[i]= short_test_start[i] − short_train_months\n"
+            "  short_train_end[i]  = short_test_start[i]\n"
+            "```\n"
+            "Each cycle picks **bottom-N by score** on its own train window and holds short for that interval. "
+            "Capital is recycled — the same `$short_per_side` is redeployed each cycle.\n\n"
+            "**P&L aggregation**\n"
+            "```\n"
+            "Long P&L      = Σ alloc_long(x)  × actual_pct_long(x) / 100\n"
+            "Short P&L_i   = Σ alloc_short(x) × (−actual_pct_short_i(x)) / 100\n"
+            "Total P&L     = Long P&L + Σ_i Short P&L_i\n"
+            "Total Inv $   = $long_per_side + $short_per_side  (capital recycled, peak exposure)\n"
+            "Total Return %= Total P&L / Total Inv $ × 100\n"
+            "```"
+        )
+
+    real_today = datetime.date.today()
+
+    st.sidebar.title("⚙️ Multi-Window Settings")
+    test_end = st.sidebar.date_input(
+        "Anchor (test end) date",
+        value=real_today, max_value=real_today,
+    )
+
+    st.sidebar.markdown("**Long side**")
+    long_train_m = st.sidebar.slider("Long train (months)", 1, 36, 12, key="mw_lt")
+    long_test_m = st.sidebar.slider("Long test (months)", 1, 24, 12, key="mw_le")
+
+    st.sidebar.markdown("**Short side (rolling)**")
+    short_train_m = st.sidebar.slider("Short train (months)", 1, 12, 1, key="mw_st")
+    short_test_m = st.sidebar.slider("Short test interval (months)", 1, 12, 1, key="mw_se")
+
+    st.sidebar.markdown("---")
+    etf_text = st.sidebar.text_area(
+        "Tickers", value=", ".join(DEFAULT_ETF_LIST), height=140, key="mw_tk",
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Score formula**")
+    use_diff = st.sidebar.checkbox("(ExpReg − Price)", value=True, key="mw_ud")
+    use_r = st.sidebar.checkbox("r", value=True, key="mw_ur")
+    use_b = st.sidebar.checkbox("b", value=True, key="mw_ub")
+    use_sharpe = st.sidebar.checkbox("Sharpe", value=False, key="mw_us")
+
+    st.sidebar.markdown("---")
+    top_n = st.sidebar.number_input("Top / bottom N", 1, 30, 10, key="mw_n")
+    long_usd = st.sidebar.number_input("$ per side — Long", 100.0, 1_000_000.0, 1000.0, 100.0, key="mw_lu")
+    short_usd = st.sidebar.number_input("$ per side — Short", 100.0, 1_000_000.0, 1000.0, 100.0, key="mw_su")
+    rf_annual_mw = st.sidebar.number_input("Risk-free %", 0.0, 20.0, 4.5, 0.1, key="mw_rf")
+    rf_daily_mw = (rf_annual_mw / 100) / TRADING_DAYS_PER_YEAR
+
+    run_mw = st.sidebar.button("▶ Run Multi-Window Backtest", type="primary", use_container_width=True)
+
+    long_test_start = test_end - relativedelta(months=long_test_m)
+    long_train_start = long_test_start - relativedelta(months=long_train_m)
+
+    intervals: list[dict] = []
+    n_intervals = max(1, long_test_m // short_test_m)
+    for i in range(n_intervals):
+        st_start = long_test_start + relativedelta(months=i * short_test_m)
+        st_end = st_start + relativedelta(months=short_test_m)
+        if st_end > test_end:
+            st_end = test_end
+        if st_start >= test_end:
+            break
+        st_train_start = st_start - relativedelta(months=short_train_m)
+        intervals.append({
+            "i": i,
+            "train_start": st_train_start,
+            "train_end": st_start,
+            "test_start": st_start,
+            "test_end": st_end,
+        })
+
+    st.markdown(
+        f"**Long**:&nbsp; train `{long_train_start} → {long_test_start}` &nbsp;|&nbsp; "
+        f"test `{long_test_start} → {test_end}`  ({long_train_m}+{long_test_m} mo)"
+    )
+    st.markdown(
+        f"**Short cycles** ({len(intervals)}):&nbsp; train `{short_train_m}mo` → test `{short_test_m}mo`, "
+        f"rolling forward inside the long-test span."
+    )
+
+    timeline = go.Figure()
+    timeline.add_trace(go.Scatter(
+        x=[long_train_start, long_test_start], y=[1, 1], mode="lines",
+        line=dict(color="#9fb1c9", width=10), name="Long train", hoverinfo="skip",
+    ))
+    timeline.add_trace(go.Scatter(
+        x=[long_test_start, test_end], y=[1, 1], mode="lines",
+        line=dict(color="#34d399", width=14), name="Long test", hoverinfo="skip",
+    ))
+    for iv in intervals:
+        timeline.add_trace(go.Scatter(
+            x=[iv["train_start"], iv["test_start"]], y=[0.5, 0.5], mode="lines",
+            line=dict(color="#67809f", width=4), showlegend=False, hoverinfo="skip",
+        ))
+        timeline.add_trace(go.Scatter(
+            x=[iv["test_start"], iv["test_end"]], y=[0.5, 0.5], mode="lines",
+            line=dict(color="#f87171", width=8), showlegend=False, hoverinfo="skip",
+        ))
+    timeline.update_layout(
+        height=180, margin=dict(l=20, r=20, t=20, b=30),
+        yaxis=dict(showticklabels=False, range=[0, 1.5], fixedrange=True),
+        xaxis_title="Date",
+        title="Window timeline (top: long, bottom: short cycles)",
+        showlegend=True,
+    )
+    st.plotly_chart(timeline, use_container_width=True)
+
+    if not run_mw:
+        st.info("Configure windows + tickers, then click **Run Multi-Window Backtest**.")
+        return
+
+    raw_tickers = [t.strip().upper() for t in etf_text.replace("\n", ",").split(",")]
+    tickers = [t for t in raw_tickers if t]
+    if not tickers:
+        st.error("No tickers provided.")
+        return
+
+    components = {"diff": use_diff, "r": use_r, "b": use_b, "sharpe": use_sharpe}
+
+    # ── compute LONG basket ─────────────────────────────────────────────────
+    long_factors: list[dict] = []
+    failed: list[str] = []
+    progress = st.progress(0.0, text="Computing long-side factors...")
+    for i, tk in enumerate(tickers, start=1):
+        progress.progress(i / len(tickers), text=f"Long {tk} ({i}/{len(tickers)})")
+        try:
+            f = compute_factors(tk, long_train_start, long_test_start, test_end, rf_daily_mw)
+        except Exception:  # noqa: BLE001
+            f = None
+        if f is None:
+            failed.append(tk)
+        else:
+            long_factors.append(f)
+    progress.empty()
+
+    long_rows = [build_result_row(f, components) for f in long_factors]
+    long_df = pd.DataFrame(long_rows).dropna(subset=["Score"]).sort_values("Score", ascending=False)
+    longs = long_df.head(int(top_n)).copy()
+    if not longs.empty:
+        eligible = longs["Score"] > 0
+        eligible_score = longs["Score"].abs() * eligible.astype(float)
+        abs_sum = eligible_score.sum() or 1.0
+        longs["Weight"] = (eligible_score / abs_sum).round(4)
+        longs["$ Allocation"] = (longs["Weight"] * long_usd).round(2)
+        longs["P&L $"] = (longs["$ Allocation"] * longs["Actual %"] / 100).round(2)
+    long_pnl = float(longs["P&L $"].sum()) if not longs.empty else 0.0
+    long_invested = float(longs["$ Allocation"].sum()) if not longs.empty else 0.0
+
+    # ── short cycles ────────────────────────────────────────────────────────
+    cycle_rows: list[dict] = []
+    cycle_baskets: list[pd.DataFrame] = []
+    progress = st.progress(0.0, text="Computing short cycles...")
+    total_steps = len(intervals) * len(tickers)
+    step = 0
+    for iv in intervals:
+        cycle_factors = []
+        for tk in tickers:
+            step += 1
+            progress.progress(step / max(total_steps, 1), text=f"Cycle {iv['i']+1}/{len(intervals)} · {tk}")
+            try:
+                f = compute_factors(tk, iv["train_start"], iv["test_start"], iv["test_end"], rf_daily_mw)
+            except Exception:  # noqa: BLE001
+                f = None
+            if f is not None:
+                cycle_factors.append(f)
+        rows = [build_result_row(f, components) for f in cycle_factors]
+        cdf = pd.DataFrame(rows).dropna(subset=["Score"]).sort_values("Score", ascending=False)
+        shorts = cdf.tail(int(top_n)).copy() if len(cdf) >= int(top_n) else cdf.copy()
+        if not shorts.empty:
+            eligible = (shorts["Score"] < 0) & (shorts["r"] < 0) & (shorts["b"] < 0)
+            eligible_score = shorts["Score"].abs() * eligible.astype(float)
+            abs_sum = eligible_score.sum() or 1.0
+            shorts["Weight"] = (eligible_score / abs_sum).round(4)
+            shorts["$ Allocation"] = (shorts["Weight"] * short_usd).round(2)
+            shorts["P&L $"] = (shorts["$ Allocation"] * (-shorts["Actual %"]) / 100).round(2)
+        cycle_pnl = float(shorts["P&L $"].sum()) if not shorts.empty else 0.0
+        cycle_invested = float(shorts["$ Allocation"].sum()) if not shorts.empty else 0.0
+        cycle_ret = (cycle_pnl / cycle_invested * 100) if cycle_invested else 0.0
+        cycle_rows.append({
+            "Cycle": iv["i"] + 1,
+            "Train": f"{iv['train_start']} → {iv['train_end']}",
+            "Test": f"{iv['test_start']} → {iv['test_end']}",
+            "Names": len(shorts),
+            "Invested $": round(cycle_invested, 2),
+            "P&L $": round(cycle_pnl, 2),
+            "Return %": round(cycle_ret, 2),
+            "Top short": shorts["Ticker"].iloc[0] if not shorts.empty else "—",
+            "Bottom short": shorts["Ticker"].iloc[-1] if not shorts.empty else "—",
+        })
+        cycle_baskets.append(shorts.assign(Cycle=iv["i"] + 1))
+    progress.empty()
+
+    short_pnl = sum(r["P&L $"] for r in cycle_rows)
+    total_pnl = long_pnl + short_pnl
+    total_inv = long_invested + short_usd  # short capital is recycled, so peak = $short_per_side
+    total_ret = (total_pnl / total_inv * 100) if total_inv > 0 else 0.0
+
+    # ── headline metrics ────────────────────────────────────────────────────
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("💰 Total Inv $", f"${total_inv:,.0f}")
+    mc2.metric("Long P&L $", f"${long_pnl:+,.2f}")
+    mc3.metric("Short P&L $ (cycles)", f"${short_pnl:+,.2f}")
+    mc4.metric("Total P&L $", f"${total_pnl:+,.2f}")
+    mc5.metric("📈 Total Return %", f"{total_ret:+.2f}%")
+
+    # ── long basket ─────────────────────────────────────────────────────────
+    st.markdown("### 🟢 LONG basket (held entire long-test window)")
+    if longs.empty:
+        st.info("No long positions.")
+    else:
+        st.dataframe(
+            longs[["Ticker", "Score", "r", "Actual %", "Weight", "$ Allocation", "P&L $"]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(f"Long invested ${long_invested:,.2f} · P&L ${long_pnl:+,.2f} · "
+                   f"return {(long_pnl / long_invested * 100 if long_invested else 0):+.2f}%")
+
+    # ── short cycles summary ────────────────────────────────────────────────
+    st.markdown("### 🔴 SHORT rolling cycles")
+    cycle_df = pd.DataFrame(cycle_rows)
+    st.dataframe(cycle_df, use_container_width=True, hide_index=True)
+
+    bar = go.Figure()
+    colors = ["#34d399" if v >= 0 else "#f87171" for v in cycle_df["P&L $"]]
+    bar.add_trace(go.Bar(
+        x=[f"#{c}" for c in cycle_df["Cycle"]],
+        y=cycle_df["P&L $"],
+        marker_color=colors,
+        text=[f"${v:+.2f}" for v in cycle_df["P&L $"]],
+        textposition="outside",
+    ))
+    bar.add_hline(y=0, line_color="gray", opacity=0.5)
+    bar.update_layout(
+        title="Short P&L by cycle ($)",
+        height=380, margin=dict(l=40, r=40, t=60, b=40),
+        yaxis_title="P&L $", xaxis_title="Cycle",
+    )
+    st.plotly_chart(bar, use_container_width=True)
+
+    # ── equity curve (cumulative P&L) ───────────────────────────────────────
+    cum_pnl = cycle_df["P&L $"].cumsum() + long_pnl  # long realized at end, but for simplicity attribute upfront
+    line = go.Figure()
+    line.add_trace(go.Scatter(
+        x=list(range(1, len(cycle_df) + 1)),
+        y=cycle_df["P&L $"].cumsum(),
+        mode="lines+markers", name="Cumulative SHORT P&L",
+        line=dict(color="#f87171", width=3),
+    ))
+    line.add_hline(y=long_pnl, line_dash="dash", line_color="#34d399",
+                   annotation_text=f"Long P&L ${long_pnl:+.2f}", annotation_position="top right")
+    line.update_layout(
+        title="Cumulative short P&L vs realized long P&L",
+        xaxis_title="Cycle", yaxis_title="$ P&L",
+        height=360, margin=dict(l=40, r=40, t=60, b=40),
+    )
+    st.plotly_chart(line, use_container_width=True)
+
+    # ── per-cycle baskets ───────────────────────────────────────────────────
+    with st.expander(f"Per-cycle short baskets ({len(cycle_baskets)})"):
+        for cb in cycle_baskets:
+            if cb.empty:
+                continue
+            cyc = int(cb["Cycle"].iloc[0])
+            st.markdown(f"**Cycle {cyc}**")
+            st.dataframe(
+                cb[["Ticker", "Score", "r", "Actual %", "Weight", "$ Allocation", "P&L $"]],
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── exports ─────────────────────────────────────────────────────────────
+    cdl1, cdl2 = st.columns(2)
+    cdl1.download_button(
+        "📥 Cycle summary CSV",
+        cycle_df.to_csv(index=False).encode("utf-8"),
+        file_name=f"multiwindow_cycles_{test_end}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    if cycle_baskets:
+        all_shorts = pd.concat(cycle_baskets, ignore_index=True)
+        cdl2.download_button(
+            "📥 All short positions CSV",
+            all_shorts.to_csv(index=False).encode("utf-8"),
+            file_name=f"multiwindow_shorts_{test_end}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
 st.sidebar.title("⚙️ Settings")
 
 page = st.sidebar.radio(
     "📑 Page",
-    ["📊 Dashboard", "🔬 Backtest Validator"],
+    ["📊 Dashboard", "🔬 Backtest Validator", "🔄 Multi-Window Backtest"],
     index=0,
 )
 st.sidebar.markdown("---")
 
 if page == "🔬 Backtest Validator":
     render_backtest_page()
+    st.stop()
+
+if page == "🔄 Multi-Window Backtest":
+    render_multiwindow_page()
     st.stop()
 
 compare_mode = st.sidebar.toggle("Compare Two Stocks", value=False)
