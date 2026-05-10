@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dateutil.relativedelta import relativedelta
 
+import backtest_core as bc
+
 st.set_page_config(
     page_title="Risk/Return Ratio Dashboard",
     page_icon="📊",
@@ -226,6 +228,32 @@ def calc_exp_regression(prices: pd.Series):
 
 
 # ── backtest validator ──────────────────────────────────────────────────────
+
+LARGE_CAP_STOCKS = [
+    # tech
+    "AAPL", "MSFT", "GOOGL", "META", "NVDA", "AMZN", "TSLA", "AVGO", "ORCL", "ADBE",
+    "CRM", "AMD", "CSCO", "INTC", "QCOM", "TXN", "INTU", "NOW", "IBM", "AMAT",
+    "MU", "LRCX", "KLAC", "ANET", "PANW", "CRWD", "NET", "SNOW", "DDOG", "PLTR",
+    # comm / media
+    "NFLX", "DIS", "CMCSA", "TMUS", "VZ", "T", "EA", "ROKU", "SPOT",
+    # consumer discretionary
+    "HD", "NKE", "MCD", "SBUX", "LOW", "TGT", "BKNG", "ABNB", "UBER",
+    "CMG", "MAR", "F", "GM",
+    # consumer staples
+    "PG", "KO", "PEP", "WMT", "COST", "MDLZ", "PM", "MO", "CL",
+    # healthcare
+    "UNH", "JNJ", "LLY", "PFE", "ABBV", "MRK", "TMO", "ABT", "DHR", "BMY",
+    "AMGN", "GILD", "ISRG", "VRTX", "CVS", "MDT",
+    # financials
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA", "AXP", "BLK",
+    "SCHW", "BX", "KKR",
+    # industrial
+    "BA", "CAT", "GE", "HON", "UPS", "FDX", "UNP", "RTX", "LMT", "DE",
+    # energy operators
+    "XOM", "CVX", "COP",
+    # utilities
+    "NEE", "DUK",
+]
 
 DEFAULT_ETF_LIST = [
     # broad US equity
@@ -506,11 +534,24 @@ def render_backtest_page():
     )
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**ETF / Ticker List**")
+    st.sidebar.markdown("**Universe**")
+    universe = st.sidebar.selectbox(
+        "Preset list",
+        ["Equity ETFs (100)", "Large-cap US stocks (~100)", "Custom"],
+        index=0,
+        help="Switch between curated universes. Custom = use whatever you type below.",
+    )
+    if universe == "Equity ETFs (100)":
+        default_text = ", ".join(DEFAULT_ETF_LIST)
+    elif universe == "Large-cap US stocks (~100)":
+        default_text = ", ".join(LARGE_CAP_STOCKS)
+    else:
+        default_text = ""
     etf_text = st.sidebar.text_area(
         "Tickers (comma- or newline-separated)",
-        value=", ".join(DEFAULT_ETF_LIST),
+        value=default_text,
         height=160,
+        key=f"tickers_{universe}",
     )
 
     st.sidebar.markdown("---")
@@ -601,6 +642,7 @@ def render_backtest_page():
     test_start = meta["test_start"]
     months_train = meta["months_train"]
     months_test = meta["months_test"]
+    unit = meta.get("unit", "months")
     rf_annual_bt = meta["rf_annual_bt"]
 
     if not factors_list:
@@ -1164,8 +1206,8 @@ def render_backtest_page():
         "Backtest Report",
         "================",
         f"Generated: {datetime.datetime.now().isoformat(timespec='seconds')}",
-        f"Train window: {train_start} -> {test_start} ({months_train} months)",
-        f"Test window:  {test_start} -> {today} ({months_test} months)",
+        f"Train window: {train_start} -> {test_start} ({months_train} {unit})",
+        f"Test window:  {test_start} -> {today} ({months_test} {unit})",
         f"Risk-free annual: {rf_annual_bt:.2f}%",
         f"Tickers attempted: {meta['tickers_attempted']}, succeeded: {len(factors_list)}",
         "",
@@ -1529,13 +1571,353 @@ def render_multiwindow_page():
         )
 
 
+def render_walkforward_page():
+    st.title("🔁 Walk-Forward Backtest")
+    st.markdown(
+        "Roll a fixed train→test window forward through history. Each cycle: train on the "
+        "preceding window, build the portfolio, hold across the test window, record P&L. "
+        "Aggregates into an equity curve so you can see if the strategy compounds or just "
+        "got lucky on one window."
+    )
+
+    real_today = datetime.date.today()
+    st.sidebar.title("⚙️ Walk-Forward Settings")
+
+    start_date = st.sidebar.date_input(
+        "Start date", value=real_today - relativedelta(years=2), max_value=real_today,
+        key="wf_start",
+    )
+    end_date = st.sidebar.date_input(
+        "End date", value=real_today, max_value=real_today, key="wf_end",
+    )
+
+    unit = st.sidebar.selectbox("Window unit", ["months", "weeks", "days"], index=0, key="wf_unit")
+    if unit == "months":
+        train_n = st.sidebar.slider("Train (months)", 1, 24, 3, key="wf_train_m")
+        test_n = st.sidebar.slider("Test (months)", 1, 12, 3, key="wf_test_m")
+        train_delta = relativedelta(months=train_n)
+        test_delta = relativedelta(months=test_n)
+    elif unit == "weeks":
+        train_n = st.sidebar.slider("Train (weeks)", 1, 52, 6, key="wf_train_w")
+        test_n = st.sidebar.slider("Test (weeks)", 1, 26, 2, key="wf_test_w")
+        train_delta = datetime.timedelta(weeks=train_n)
+        test_delta = datetime.timedelta(weeks=test_n)
+    else:
+        train_n = st.sidebar.slider("Train (days)", 5, 180, 30, key="wf_train_d")
+        test_n = st.sidebar.slider("Test (days)", 2, 90, 14, key="wf_test_d")
+        train_delta = datetime.timedelta(days=train_n)
+        test_delta = datetime.timedelta(days=test_n)
+
+    st.sidebar.markdown("---")
+    universe = st.sidebar.selectbox(
+        "Universe", ["Equity ETFs (100)", "Large-cap US stocks (~100)", "Custom"], index=0, key="wf_universe",
+    )
+    if universe == "Equity ETFs (100)":
+        default_text = ", ".join(DEFAULT_ETF_LIST)
+    elif universe == "Large-cap US stocks (~100)":
+        default_text = ", ".join(LARGE_CAP_STOCKS)
+    else:
+        default_text = ""
+    tickers_text = st.sidebar.text_area(
+        "Tickers", value=default_text, height=140, key=f"wf_tickers_{universe}",
+    )
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Score formula**")
+    use_diff = st.sidebar.checkbox("diff (ExpReg − Price)", value=True, key="wf_diff")
+    use_r = st.sidebar.checkbox("r", value=True, key="wf_r")
+    use_b = st.sidebar.checkbox("b", value=True, key="wf_b")
+    use_sharpe = st.sidebar.checkbox("Sharpe", value=False, key="wf_sharpe")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Portfolio**")
+    st.sidebar.caption("All three side modes are computed in parallel and compared.")
+    top_n = st.sidebar.number_input("Top / bottom N", 1, 50, 10, key="wf_topn")
+    portfolio_usd = st.sidebar.number_input("Portfolio $ per side", 10.0, 1_000_000.0, 1000.0, 100.0, key="wf_usd")
+    r_thresh = st.sidebar.slider("|r| threshold", 0.0, 1.0, 0.0, 0.05, key="wf_rthresh")
+    score_thresh = st.sidebar.number_input("|Score| threshold", 0.0, 1e6, 0.0, key="wf_sthresh", format="%.6g")
+    strict_short = st.sidebar.checkbox("Strict short gate (r<0 AND b<0)", value=True, key="wf_strict")
+    alloc_method = st.sidebar.selectbox("Allocation method", ["score", "confidence"], key="wf_alloc",
+                                         help="score = |Score|; confidence = |Score|×r²")
+    max_cap = st.sidebar.slider("Max weight cap", 0.05, 1.0, 1.0, 0.05, key="wf_cap")
+    rf_annual = st.sidebar.number_input("Risk-Free annual %", 0.0, 20.0, 4.5, 0.1, key="wf_rf")
+
+    run = st.sidebar.button("▶ Run Walk-Forward", type="primary", use_container_width=True, key="wf_run")
+
+    if start_date >= end_date:
+        st.error("Start date must be before end date.")
+        return
+
+    # build cycles (preview before running)
+    cycles_plan: list[tuple[datetime.date, datetime.date, datetime.date]] = []
+    cur_train_start = start_date
+    while True:
+        cur_test_start = cur_train_start + train_delta
+        cur_test_end = cur_test_start + test_delta
+        if cur_test_end > end_date:
+            break
+        cycles_plan.append((cur_train_start, cur_test_start, cur_test_end))
+        cur_train_start = cur_train_start + test_delta  # advance by test delta (no train overlap with prior test)
+
+    st.markdown(f"**Plan:** {len(cycles_plan)} cycles · train {train_n} {unit} → test {test_n} {unit}, "
+                f"covering `{start_date}` → `{end_date}`")
+
+    if not cycles_plan:
+        st.warning("Train+test span exceeds the date range. Shorten windows or extend the range.")
+        return
+
+    if run:
+        raw_tickers = [t.strip().upper() for t in tickers_text.replace("\n", ",").split(",") if t.strip()]
+        if not raw_tickers:
+            st.error("No tickers provided.")
+            return
+        components = {"diff": use_diff, "r": use_r, "b": use_b, "sharpe": use_sharpe}
+
+        progress = st.progress(0.0, text="Running cycles...")
+        results: list[dict] = []
+        # three independent compounded balances, one per mode
+        ls_bal = l_bal = s_bal = float(portfolio_usd)
+        for i, (ts, ms, me) in enumerate(cycles_plan, start=1):
+            progress.progress(i / len(cycles_plan), text=f"Cycle {i}/{len(cycles_plan)} · {ts} → {me}")
+
+            # one fetch per cycle: returns long+short baskets + per-side P&L for $portfolio_usd notional
+            try:
+                r = bc.build_portfolio_dated(
+                    raw_tickers,
+                    train_start=ts, test_start=ms, test_end=me,
+                    rf_annual=rf_annual, formula_components=components,
+                    top_n=int(top_n),
+                    portfolio_usd=float(portfolio_usd),  # notional for per-position $; we recompute % per mode
+                    r_threshold=r_thresh, score_threshold=score_thresh,
+                    strict_short=strict_short,
+                    include_long=True, include_short=True,
+                    alloc_method=alloc_method, max_cap=max_cap,
+                )
+            except Exception as exc:  # noqa: BLE001
+                r = {"train_start": str(ts), "test_start": str(ms), "test_end": str(me),
+                     "total_return_pct": 0.0, "total_pnl": 0.0, "total_invested": 0.0,
+                     "long_pnl": 0.0, "short_pnl": 0.0,
+                     "long_invested": 0.0, "short_invested": 0.0,
+                     "n_long": 0, "n_short": 0, "long_basket": [], "short_basket": [],
+                     "skipped": [], "error": str(exc)}
+
+            # per-mode % returns (invariant w.r.t. notional)
+            li, si = float(r["long_invested"]), float(r["short_invested"])
+            lp, sp = float(r["long_pnl"]), float(r["short_pnl"])
+            ls_inv = li + si
+            ls_ret = ((lp + sp) / ls_inv) if ls_inv > 0 else 0.0
+            l_ret = (lp / li) if li > 0 else 0.0
+            s_ret = (sp / si) if si > 0 else 0.0
+
+            # compound each mode's running balance
+            ls_start, l_start, s_start = ls_bal, l_bal, s_bal
+            ls_bal = ls_start * (1 + ls_ret)
+            l_bal = l_start * (1 + l_ret)
+            s_bal = s_start * (1 + s_ret)
+
+            r["ls_return_pct"] = round(ls_ret * 100, 4)
+            r["l_return_pct"] = round(l_ret * 100, 4)
+            r["s_return_pct"] = round(s_ret * 100, 4)
+            r["ls_start"] = round(ls_start, 2); r["ls_end"] = round(ls_bal, 2)
+            r["l_start"] = round(l_start, 2);   r["l_end"] = round(l_bal, 2)
+            r["s_start"] = round(s_start, 2);   r["s_end"] = round(s_bal, 2)
+            results.append(r)
+        progress.empty()
+        st.session_state.wf_results = results
+        st.session_state.wf_meta = {
+            "start_date": start_date, "end_date": end_date,
+            "portfolio_usd": float(portfolio_usd), "n_cycles": len(results),
+        }
+
+    if "wf_results" not in st.session_state:
+        st.info("Configure settings in the sidebar and click **Run Walk-Forward**.")
+        return
+
+    results = st.session_state.wf_results
+    wf_meta = st.session_state.wf_meta
+    portfolio_usd = wf_meta["portfolio_usd"]
+    start_date = wf_meta["start_date"]
+    end_date = wf_meta["end_date"]
+
+    df = pd.DataFrame(results)
+    df["cycle"] = range(1, len(df) + 1)
+    starting_usd = float(portfolio_usd)
+
+    # ── three-mode summary ───────────────────────────────────────────────
+    modes = [
+        {"key": "ls", "label": "Long + Short", "color": "#1f77b4"},
+        {"key": "l",  "label": "Long only",    "color": "#2ca02c"},
+        {"key": "s",  "label": "Short only",   "color": "#d62728"},
+    ]
+    summary: dict[str, dict] = {}
+    for m in modes:
+        ret_col = f"{m['key']}_return_pct"
+        end_col = f"{m['key']}_end"
+        equity = df[end_col] / starting_usd
+        peak = equity.cummax()
+        dd = (equity - peak) / peak
+        summary[m["key"]] = {
+            "label": m["label"], "color": m["color"],
+            "ending_usd": float(df[end_col].iloc[-1]) if len(df) else starting_usd,
+            "cum_ret_pct": float((equity.iloc[-1] - 1) * 100) if len(equity) else 0.0,
+            "win_rate": float((df[ret_col] > 0).mean() * 100),
+            "avg_per_cycle": float(df[ret_col].mean()),
+            "max_dd_pct": float(dd.min() * 100) if len(dd) else 0.0,
+            "best": float(df[ret_col].max()),
+            "worst": float(df[ret_col].min()),
+        }
+
+    best_mode_key = max(summary, key=lambda k: summary[k]["cum_ret_pct"])
+
+    st.markdown(f"#### 📦 Starting capital: **${starting_usd:,.2f}** · {len(df)} cycles")
+    bcols = st.columns(3)
+    for col, m in zip(bcols, modes):
+        s = summary[m["key"]]
+        ending = s["ending_usd"]
+        pnl = ending - starting_usd
+        accent = "#34d399" if pnl >= 0 else "#f87171"
+        bg = "#1a4d2e" if pnl >= 0 else "#5a1d1d"
+        crown = " 🏆" if m["key"] == best_mode_key else ""
+        col.markdown(
+            f"""
+            <div style="background:{bg};border-radius:12px;padding:18px;border-top:4px solid {m['color']};">
+              <div style="font-size:14px;color:#9fb1c9;letter-spacing:1px;">{m['label'].upper()}{crown}</div>
+              <div style="font-size:32px;font-weight:800;color:{accent};margin-top:4px;">${ending:,.2f}</div>
+              <div style="font-size:18px;color:{accent};">{s['cum_ret_pct']:+.2f}% &nbsp; ({pnl:+,.2f} $)</div>
+              <div style="font-size:13px;color:#9fb1c9;margin-top:8px;">
+                Win rate {s['win_rate']:.0f}% · Avg/cyc {s['avg_per_cycle']:+.2f}% · MaxDD {s['max_dd_pct']:.2f}%
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # ── overlaid equity curves ───────────────────────────────────────────
+    eq_fig = go.Figure()
+    for m in modes:
+        eq_fig.add_trace(go.Scatter(
+            x=df["test_end"], y=df[f"{m['key']}_end"],
+            mode="lines+markers", name=m["label"],
+            line=dict(color=m["color"], width=2),
+            hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>$%{{y:,.2f}}<extra></extra>",
+        ))
+    eq_fig.add_hline(y=starting_usd, line_dash="dash", line_color="gray", opacity=0.6,
+                      annotation_text=f"start ${starting_usd:,.0f}", annotation_position="left")
+    eq_fig.update_layout(
+        title=f"Equity Curves — Long+Short vs Long-only vs Short-only (start ${starting_usd:,.0f})",
+        xaxis_title="Test-window end", yaxis_title="Account Value $",
+        height=440, margin=dict(l=40, r=40, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(eq_fig, use_container_width=True)
+
+    # ── per-cycle return % grouped bars ──────────────────────────────────
+    bar_fig = go.Figure()
+    for m in modes:
+        ret_col = f"{m['key']}_return_pct"
+        bar_fig.add_trace(go.Bar(
+            x=df["test_end"], y=df[ret_col], name=m["label"],
+            marker_color=m["color"],
+            hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
+        ))
+    bar_fig.add_hline(y=0, line_color="gray", opacity=0.6)
+    bar_fig.update_layout(
+        title="Per-Cycle Return % — by mode",
+        barmode="group", height=380, yaxis_title="Return %",
+        margin=dict(l=40, r=40, t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(bar_fig, use_container_width=True)
+
+    # ── per-cycle table ─────────────────────────────────────────────────
+    st.markdown("### Per-Cycle Detail (all 3 modes)")
+    show_cols = [
+        "cycle", "train_start", "test_start", "test_end",
+        "n_long", "n_short",
+        "ls_return_pct", "l_return_pct", "s_return_pct",
+        "ls_end", "l_end", "s_end",
+        "long_pnl", "short_pnl",
+    ]
+    st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "📥 Walk-Forward CSV (all modes)",
+        df[show_cols].to_csv(index=False).encode("utf-8"),
+        file_name=f"walkforward_{start_date}_{end_date}.csv",
+        mime="text/csv",
+        key="wf_dl",
+    )
+
+    # ── per-cycle inspector ───────────────────────────────────────────────
+    st.markdown("### 🔍 Inspect a cycle")
+    st.caption(
+        "Pick a cycle to see exactly which names were picked, predicted vs actual, weights, and per-name P&L. "
+        "Use this to diagnose **why** a cycle won or lost."
+    )
+
+    for idx, r in enumerate(results, start=1):
+        r["cycle"] = idx
+    cycle_labels = [
+        f"#{r['cycle']}  ·  test {r['test_start']} → {r['test_end']}  ·  "
+        f"L+S {r['ls_return_pct']:+.2f}% / L {r['l_return_pct']:+.2f}% / S {r['s_return_pct']:+.2f}%"
+        for r in results
+    ]
+    selected = st.selectbox("Cycle", range(len(results)), format_func=lambda i: cycle_labels[i], key="wf_inspect")
+    cyc = results[selected]
+
+    long_b = pd.DataFrame(cyc.get("long_basket", []))
+    short_b = pd.DataFrame(cyc.get("short_basket", []))
+
+    cm1, cm2, cm3, cm4 = st.columns(4)
+    cm1.metric("Long P&L $", f"${cyc['long_pnl']:+,.2f}")
+    cm2.metric("Short P&L $", f"${cyc['short_pnl']:+,.2f}")
+    cm3.metric("L+S Return %", f"{cyc['ls_return_pct']:+.2f}%")
+    cm4.metric("L-only / S-only", f"{cyc['l_return_pct']:+.2f}% / {cyc['s_return_pct']:+.2f}%")
+
+    pred_cols = ["ticker", "predicted", "actual", "match", "actual_pct", "score", "r", "b", "weight", "allocation_usd", "pnl_usd"]
+
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.markdown(f"**🟢 LONG basket — {len(long_b)} positions**")
+        if long_b.empty:
+            st.info("No long positions this cycle.")
+        else:
+            wins = int((long_b["match"]).sum())
+            st.caption(f"Hit rate: **{wins}/{len(long_b)}** correct ({wins/len(long_b)*100:.0f}%)")
+            st.dataframe(long_b[pred_cols], use_container_width=True, hide_index=True)
+    with bcol2:
+        st.markdown(f"**🔴 SHORT basket — {len(short_b)} positions**")
+        if short_b.empty:
+            st.info("No short positions this cycle.")
+        else:
+            wins = int((short_b["match"]).sum())
+            st.caption(f"Hit rate: **{wins}/{len(short_b)}** correct ({wins/len(short_b)*100:.0f}%)")
+            st.dataframe(short_b[pred_cols], use_container_width=True, hide_index=True)
+
+    if not long_b.empty or not short_b.empty:
+        parts = []
+        if not long_b.empty:
+            parts.append(long_b.assign(side="LONG"))
+        if not short_b.empty:
+            parts.append(short_b.assign(side="SHORT"))
+        cycle_full = pd.concat(parts, ignore_index=True)
+        cycle_full = cycle_full[["side"] + pred_cols]
+        st.download_button(
+            f"📥 Cycle #{cyc['cycle']} portfolio CSV",
+            cycle_full.to_csv(index=False).encode("utf-8"),
+            file_name=f"walkforward_cycle{cyc['cycle']}_{cyc['test_end']}.csv",
+            mime="text/csv",
+            key=f"wf_cycle_dl_{cyc['cycle']}",
+        )
+
+
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
 st.sidebar.title("⚙️ Settings")
 
 page = st.sidebar.radio(
     "📑 Page",
-    ["📊 Dashboard", "🔬 Backtest Validator", "🔄 Multi-Window Backtest"],
+    ["📊 Dashboard", "🔬 Backtest Validator", "🔄 Multi-Window Backtest", "🔁 Walk-Forward"],
     index=0,
 )
 st.sidebar.markdown("---")
@@ -1546,6 +1928,10 @@ if page == "🔬 Backtest Validator":
 
 if page == "🔄 Multi-Window Backtest":
     render_multiwindow_page()
+    st.stop()
+
+if page == "🔁 Walk-Forward":
+    render_walkforward_page()
     st.stop()
 
 compare_mode = st.sidebar.toggle("Compare Two Stocks", value=False)

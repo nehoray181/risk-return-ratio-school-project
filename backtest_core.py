@@ -276,6 +276,153 @@ def build_portfolio(
     }
 
 
+def build_portfolio_dated(
+    tickers: list[str],
+    train_start: datetime.date,
+    test_start: datetime.date,
+    test_end: datetime.date,
+    rf_annual: float = 4.5,
+    formula_components: dict | None = None,
+    top_n: int = 10,
+    portfolio_usd: float = 1000.0,
+    r_threshold: float = 0.0,
+    score_threshold: float = 0.0,
+    strict_short: bool = True,
+    include_long: bool = True,
+    include_short: bool = True,
+    alloc_method: str = "score",  # "score" | "confidence"
+    max_cap: float = 1.0,
+) -> dict:
+    """Walk-forward-friendly portfolio build. Same logic as the Streamlit per-formula tab.
+
+    Returns a flat dict with per-cycle metrics (no nested baskets here — caller decides).
+    """
+    rf_daily = (rf_annual / 100) / TRADING_DAYS_PER_YEAR
+    components = formula_components or {"diff": True, "r": True, "b": True, "sharpe": False}
+
+    rows: list[dict] = []
+    skipped: list[str] = []
+    for tk in tickers:
+        tk = tk.strip().upper()
+        if not tk:
+            continue
+        try:
+            f = compute_factors(tk, train_start, test_start, test_end, rf_daily)
+        except Exception:
+            f = None
+        if f is None:
+            skipped.append(tk)
+            continue
+        score, _ = apply_formula(f, components)
+        if math.isnan(score):
+            continue
+        rows.append({
+            "ticker": tk,
+            "score": float(score),
+            "r": f["r"],
+            "b": f["b"],
+            "actual_pct": f["actual_ret_pct"],
+        })
+
+    if not rows:
+        return {
+            "train_start": str(train_start), "test_start": str(test_start), "test_end": str(test_end),
+            "long_pnl": 0.0, "short_pnl": 0.0, "total_pnl": 0.0,
+            "long_invested": 0.0, "short_invested": 0.0, "total_invested": 0.0,
+            "total_return_pct": 0.0, "n_long": 0, "n_short": 0,
+            "skipped": skipped,
+        }
+
+    # filters
+    rows = [r for r in rows if abs(r["r"]) >= r_threshold and abs(r["score"]) >= score_threshold]
+    rows.sort(key=lambda x: x["score"], reverse=True)
+    longs_raw = rows[:top_n]
+    shorts_raw = rows[-top_n:] if len(rows) > top_n else []
+
+    sides_active = (1 if include_long else 0) + (1 if include_short else 0)
+    side_usd = portfolio_usd * (2 / sides_active) if sides_active > 0 else portfolio_usd
+
+    def _basket(positions, is_long):
+        if not positions or (is_long and not include_long) or ((not is_long) and not include_short):
+            return [], 0.0, 0.0
+        eligible = []
+        for p in positions:
+            if is_long and p["score"] > 0:
+                eligible.append(p)
+            elif (not is_long) and p["score"] < 0 and (not strict_short or (p["r"] < 0 and p["b"] < 0)):
+                eligible.append(p)
+        if not eligible:
+            return [], 0.0, 0.0
+        raws = []
+        for p in eligible:
+            raw = abs(p["score"])
+            if alloc_method == "confidence":
+                raw *= p["r"] ** 2
+            raws.append(raw)
+        total = sum(raws) or 1.0
+        weights = [r / total for r in raws]
+        # apply cap
+        if max_cap < 1.0:
+            for _ in range(50):
+                over = [i for i, w in enumerate(weights) if w > max_cap + 1e-12]
+                if not over:
+                    break
+                excess = sum(weights[i] - max_cap for i in over)
+                for i in over:
+                    weights[i] = max_cap
+                under = [i for i, w in enumerate(weights) if w < max_cap - 1e-12 and w > 0]
+                under_sum = sum(weights[i] for i in under) or 0
+                if under_sum <= 0:
+                    break
+                for i in under:
+                    weights[i] += excess * weights[i] / under_sum
+        invested = 0.0
+        pnl = 0.0
+        out: list[dict] = []
+        for p, w in zip(eligible, weights):
+            alloc = w * side_usd
+            ret_mult = p["actual_pct"] / 100 if is_long else -p["actual_pct"] / 100
+            position_pnl = alloc * ret_mult
+            invested += alloc
+            pnl += position_pnl
+            predicted = "UP" if p["score"] > 0 else ("DOWN" if p["score"] < 0 else "FLAT")
+            actual = "UP" if p["actual_pct"] > 0 else ("DOWN" if p["actual_pct"] < 0 else "FLAT")
+            match = (predicted == actual) and (predicted != "FLAT")
+            out.append({
+                "ticker": p["ticker"],
+                "score": round(p["score"], 6),
+                "r": round(p["r"], 4),
+                "b": round(p["b"], 6),
+                "predicted": predicted,
+                "actual_pct": round(p["actual_pct"], 2),
+                "actual": actual,
+                "match": match,
+                "weight": round(w, 4),
+                "allocation_usd": round(alloc, 2),
+                "pnl_usd": round(position_pnl, 2),
+            })
+        return out, invested, pnl
+
+    long_positions, l_inv, l_pnl = _basket(longs_raw, True)
+    short_positions, s_inv, s_pnl = _basket(shorts_raw, False)
+    total_inv = l_inv + s_inv
+    total_pnl = l_pnl + s_pnl
+    total_ret = (total_pnl / total_inv * 100) if total_inv > 0 else 0.0
+
+    return {
+        "train_start": str(train_start), "test_start": str(test_start), "test_end": str(test_end),
+        "long_pnl": round(l_pnl, 2), "short_pnl": round(s_pnl, 2), "total_pnl": round(total_pnl, 2),
+        "long_invested": round(l_inv, 2), "short_invested": round(s_inv, 2),
+        "total_invested": round(total_inv, 2),
+        "total_return_pct": round(total_ret, 4),
+        "n_long": len(long_positions),
+        "n_short": len(short_positions),
+        "long_basket": long_positions,
+        "short_basket": short_positions,
+        "skipped": skipped,
+    }
+
+
 def compare_formulas(
     tickers: list[str],
     formulas: list[dict],
