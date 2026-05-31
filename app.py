@@ -2342,8 +2342,7 @@ def render_summary(
     full_period_results: dict[str, float],
 ):
     """Render summary-statistic metrics into *container*."""
-    with container:
-        ui.eyebrow("Summary statistics")
+    ui.eyebrow("Summary statistics", container=container)
 
     period_return = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
     annual_vol = returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
@@ -2419,8 +2418,7 @@ def render_manual_calcs(
     """Render manual-calculation expanders into *container*."""
     if not selected_ratios:
         return
-    with container:
-        ui.section_header("Math inspector", "formula, inputs, result — per selected ratio")
+    ui.section_header("Math inspector", "formula, inputs, result — per selected ratio", container=container)
     for selected_ratio in selected_ratios:
         full_ratio_value = full_ratio_values[selected_ratio]
         with container.expander(f"📐 {selected_ratio} — formula variables", expanded=False):
@@ -2518,9 +2516,8 @@ def render_exp_regression(container, prices: pd.Series, ratio_value: float):
     if fitted_series is None:
         return None
 
-    with container:
-        st.markdown('<hr class="qrl-divider" />', unsafe_allow_html=True)
-        ui.section_header("Exponential regression", "log-linear fit · composite score")
+    ui.divider(container=container)
+    ui.section_header("Exponential regression", "log-linear fit · composite score", container=container)
 
     current_price = float(prices.iloc[-1])
     exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1)))
@@ -2615,8 +2612,7 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     # Ticker header card
     last_price = float(prices.iloc[-1])
     period_chg = (float(prices.iloc[-1]) / float(prices.iloc[0]) - 1.0) * 100.0
-    with container:
-        ui.ticker_head(tk, f"{period_label} period", last_price, period_chg)
+    ui.ticker_head(tk, f"{period_label} period", last_price, period_chg, container=container)
 
     rolling_res, full_res = compute_ratios(prices, returns, br)
     fig = build_chart(tk, prices, rolling_res, full_res, exp_fitted=exp_fitted)

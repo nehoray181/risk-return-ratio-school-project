@@ -774,9 +774,9 @@ def page_header(key: str, *, override_title: str | None = None, override_sub: st
     )
 
 
-def section_header(title: str, sub: str | None = None) -> None:
+def section_header(title: str, sub: str | None = None, *, container=None) -> None:
     sub_html = f'<div class="qrl-card-sub">{html.escape(sub)}</div>' if sub else ""
-    st.markdown(
+    (container or st).markdown(
         f"""
         <div style="display:flex; flex-direction:column; gap:4px; margin: 14px 0 10px 0;">
           <div class="qrl-card-title">{html.escape(title)}</div>
@@ -787,8 +787,15 @@ def section_header(title: str, sub: str | None = None) -> None:
     )
 
 
-def eyebrow(text: str) -> None:
-    st.markdown(f'<div class="qrl-eyebrow">{html.escape(text)}</div>', unsafe_allow_html=True)
+def eyebrow(text: str, *, container=None) -> None:
+    (container or st).markdown(
+        f'<div class="qrl-eyebrow">{html.escape(text)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def divider(container=None) -> None:
+    (container or st).markdown('<hr class="qrl-divider" />', unsafe_allow_html=True)
 
 
 def pill(text: str, kind: str = "") -> str:
@@ -869,12 +876,12 @@ def card_close() -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def ticker_head(symbol: str, name: str, price: float, change_pct: float) -> None:
+def ticker_head(symbol: str, name: str, price: float, change_pct: float, *, container=None) -> None:
     cls = "up" if change_pct >= 0 else "dn"
     sign = "+" if change_pct >= 0 else "−"
     arrow = "▲" if change_pct >= 0 else "▼"
     color_var = "var(--gain)" if change_pct >= 0 else "var(--loss)"
-    st.markdown(
+    (container or st).markdown(
         f"""
         <div class="qrl-tickerhead">
           <div class="logo">{html.escape(symbol[:4])}</div>
