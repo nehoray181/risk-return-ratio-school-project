@@ -9,12 +9,15 @@ from plotly.subplots import make_subplots
 from dateutil.relativedelta import relativedelta
 
 import backtest_core as bc
+import ui
 
 st.set_page_config(
-    page_title="Risk/Return Ratio Dashboard",
-    page_icon="📊",
+    page_title="QuantumRisk Lab — Risk/Return Dashboard",
+    page_icon="◇",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
+ui.inject_styles()
 
 PERIOD_OPTIONS = {
     "1M": "1mo",
@@ -35,13 +38,7 @@ RATIO_OPTIONS = [
     "Calmar Ratio",
 ]
 
-RATIO_COLORS = {
-    "Sharpe Ratio": "#ff7f0e",
-    "Sortino Ratio": "#2ca02c",
-    "Treynor Ratio": "#d62728",
-    "Information Ratio": "#9467bd",
-    "Calmar Ratio": "#e377c2",
-}
+RATIO_COLORS = ui.RATIO_PALETTE
 
 TRADING_DAYS_PER_YEAR = 252
 
@@ -400,15 +397,14 @@ DEFAULT_FORMULAS = pd.DataFrame([
 
 
 def render_backtest_page():
-    st.title("🔬 Backtest Validator")
+    ui.page_header("validator")
     st.markdown(
         "Train on an earlier window, test predictions against the recent window. "
-        "Default: train **6→3 months ago**, test **3 months ago → today**. "
         "Define multiple **score formulas**; each is evaluated against the same factor data, "
         "so you can compare which formula predicts direction best."
     )
 
-    with st.expander("📐 Variables & formulas — full methodology"):
+    with st.expander("Variables & formulas — full methodology"):
         st.markdown(
             "**Time windows** (anchored at *T* = test-end date)\n"
             "```\n"
@@ -485,7 +481,11 @@ def render_backtest_page():
 
     real_today = datetime.date.today()
 
-    st.sidebar.title("⚙️ Backtest Settings")
+    st.sidebar.markdown(
+        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
+        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Backtest settings</div>',
+        unsafe_allow_html=True,
+    )
     st.sidebar.markdown("**Time Windows**")
     test_end = st.sidebar.date_input(
         "Test end date",
@@ -680,30 +680,41 @@ def render_backtest_page():
 
     summary_df = pd.DataFrame(summaries).sort_values("Accuracy %", ascending=False).reset_index(drop=True)
 
-    st.markdown("### 📊 Formula Comparison")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    ui.section_header("Formula comparison", "scored by directional accuracy on the test window")
 
     best = summary_df.iloc[0]
-    st.success(
-        f"**Best formula:** `{best['Formula']}` — {best['Accuracy %']}% accuracy "
-        f"({best['Correct']}/{best['Decisive']} decisive predictions correct)."
-    )
+    feat_col, board_col = st.columns([1.1, 2], gap="medium")
+    with feat_col:
+        ui.featured_card(
+            title=str(best["Formula"]),
+            big_value=f"{best['Accuracy %']:.1f}%",
+            big_caption="directional accuracy",
+            secondary_value=f"{best['Avg Actual %']:+.2f}%",
+            secondary_caption="avg actual",
+            vs_text=f"+{best['Accuracy %'] - 50:.1f} pts vs 50% coin flip",
+        )
+    with board_col:
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     bar = go.Figure()
+    colors = [ui.COLORS["accent"] if i == 0 else ui.COLORS["fg_muted"] for i in range(len(summary_df))]
     bar.add_trace(go.Bar(
         x=summary_df["Formula"],
         y=summary_df["Accuracy %"],
         text=[f"{a}%" for a in summary_df["Accuracy %"]],
         textposition="outside",
-        marker_color="#1f77b4",
+        marker_color=colors,
+        marker_line_width=0,
     ))
-    bar.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.6,
-                  annotation_text="50% (coin flip)", annotation_position="right")
+    bar.add_hline(y=50, line_dash="dash", line_color=ui.COLORS["fg_dim"], opacity=0.7,
+                  annotation_text="50% (coin flip)", annotation_position="right",
+                  annotation_font_color=ui.COLORS["fg_dim"])
     bar.update_layout(
-        title="Accuracy by Formula", height=360,
+        title="Accuracy by Formula", height=340,
         yaxis_title="Accuracy %", xaxis_title="",
-        margin=dict(l=40, r=40, t=60, b=40),
+        margin=dict(l=44, r=44, t=56, b=40),
     )
+    ui.apply_chart_theme(bar)
     st.plotly_chart(bar, use_container_width=True)
 
     if failed:
@@ -806,18 +817,22 @@ def render_backtest_page():
                     x=valid["Score"], y=valid["Actual %"],
                     mode="markers+text",
                     text=valid["Ticker"], textposition="top center",
+                    textfont=dict(family="IBM Plex Mono", size=10, color=ui.COLORS["fg_muted"]),
                     marker=dict(
-                        size=10,
-                        color=["#2ca02c" if m == "✅" else "#d62728" for m in valid["Match"]],
+                        size=11,
+                        color=[ui.COLORS["gain"] if m == "✅" else ui.COLORS["loss"] for m in valid["Match"]],
+                        line=dict(width=0),
                     ),
                 ))
-                scatter.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-                scatter.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5)
+                scatter.add_hline(y=0, line_dash="dash", line_color=ui.COLORS["fg_faint"], opacity=0.6)
+                scatter.add_vline(x=0, line_dash="dash", line_color=ui.COLORS["fg_faint"], opacity=0.6)
                 scatter.update_layout(
+                    title="Score vs actual return — green = correct call, red = miss",
                     xaxis_title=f"Score ({fname})",
-                    yaxis_title="Actual Return %",
-                    height=420, margin=dict(l=40, r=40, t=20, b=40),
+                    yaxis_title="Actual return %",
+                    height=420, margin=dict(l=44, r=44, t=56, b=40),
                 )
+                ui.apply_chart_theme(scatter)
                 st.plotly_chart(scatter, use_container_width=True)
 
             st.markdown("#### 💼 Portfolio Construction")
@@ -931,28 +946,40 @@ def render_backtest_page():
 
             pcol1, pcol2 = st.columns(2)
             with pcol1:
-                st.markdown(f"**🟢 LONG basket — {len(long_pf)} positions**")
+                st.markdown(
+                    '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
+                    + ui.pill("LONG", "solid-long")
+                    + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(long_pf)} positions</span>'
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
                 if not long_pf.empty:
                     zeroed = int((long_pf["Weight"] == 0).sum())
                     if zeroed:
-                        st.caption(f"⚠️ {zeroed} long(s) had Score ≤ 0 (predicted DOWN/FLAT) → weight set to 0; remaining longs absorb the dollars.")
+                        st.caption(f"{zeroed} long(s) had Score ≤ 0 (predicted DOWN/FLAT) → weight set to 0; remaining longs absorb the dollars.")
                     st.dataframe(long_pf, use_container_width=True, hide_index=True)
                     st.caption(
-                        f"Σ Weight = {long_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
-                        f"Σ $ = ${long_pf['$ Allocation'].sum():.2f}"
+                        f"Σ Weight {long_pf['Weight'].sum():.3f}  ·  "
+                        f"Σ $ ${long_pf['$ Allocation'].sum():,.2f}"
                     )
                 else:
                     st.info("No long positions.")
             with pcol2:
-                st.markdown(f"**🔴 SHORT basket — {len(short_pf)} positions**")
+                st.markdown(
+                    '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
+                    + ui.pill("SHORT", "solid-short")
+                    + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(short_pf)} positions</span>'
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
                 if not short_pf.empty:
                     zeroed = int((short_pf["Weight"] == 0).sum())
                     if zeroed:
-                        st.caption(f"⚠️ {zeroed} short(s) had Score ≥ 0 (predicted UP/FLAT) → weight set to 0; remaining shorts absorb the dollars.")
+                        st.caption(f"{zeroed} short(s) had Score ≥ 0 (predicted UP/FLAT) → weight set to 0; remaining shorts absorb the dollars.")
                     st.dataframe(short_pf, use_container_width=True, hide_index=True)
                     st.caption(
-                        f"Σ Weight = {short_pf['Weight'].sum():.3f} &nbsp;|&nbsp; "
-                        f"Σ $ = ${short_pf['$ Allocation'].sum():.2f}"
+                        f"Σ Weight {short_pf['Weight'].sum():.3f}  ·  "
+                        f"Σ $ ${short_pf['$ Allocation'].sum():,.2f}"
                     )
                 else:
                     st.info("No short positions.")
@@ -1162,35 +1189,40 @@ def render_backtest_page():
         bar_pf.add_trace(go.Bar(
             name="Long P&L",
             x=pf_compare_df["Formula"], y=pf_compare_df["Long P&L $"],
-            marker_color="#2ca02c",
+            marker_color=ui.COLORS["gain"],
+            marker_line_width=0,
         ))
         bar_pf.add_trace(go.Bar(
             name="Short P&L",
             x=pf_compare_df["Formula"], y=pf_compare_df["Short P&L $"],
-            marker_color="#d62728",
+            marker_color=ui.COLORS["loss"],
+            marker_line_width=0,
         ))
         bar_pf.update_layout(
             barmode="relative",
             title="Long / Short P&L by Formula ($)",
             yaxis_title="P&L $", xaxis_title="",
-            height=380, margin=dict(l=40, r=40, t=60, b=40),
+            height=360, margin=dict(l=44, r=44, t=56, b=40),
         )
+        ui.apply_chart_theme(bar_pf)
         st.plotly_chart(bar_pf, use_container_width=True)
 
         bar_ret = go.Figure()
-        colors = ["#2ca02c" if v >= 0 else "#d62728" for v in pf_compare_df["Total Return %"]]
+        colors = [ui.COLORS["gain"] if v >= 0 else ui.COLORS["loss"] for v in pf_compare_df["Total Return %"]]
         bar_ret.add_trace(go.Bar(
             x=pf_compare_df["Formula"], y=pf_compare_df["Total Return %"],
             marker_color=colors,
+            marker_line_width=0,
             text=[f"{v:.2f}%" for v in pf_compare_df["Total Return %"]],
             textposition="outside",
         ))
-        bar_ret.add_hline(y=0, line_color="gray", opacity=0.6)
+        bar_ret.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.6)
         bar_ret.update_layout(
             title="Total Return % by Formula",
             yaxis_title="Return %", xaxis_title="",
-            height=380, margin=dict(l=40, r=40, t=60, b=40),
+            height=360, margin=dict(l=44, r=44, t=56, b=40),
         )
+        ui.apply_chart_theme(bar_ret)
         st.plotly_chart(bar_ret, use_container_width=True)
 
         st.download_button(
@@ -1257,15 +1289,15 @@ def render_backtest_page():
 # ── multi-window backtest ────────────────────────────────────────────────────
 
 def render_multiwindow_page():
-    st.title("🔄 Multi-Window Backtest")
+    ui.page_header("multiwindow")
     st.markdown(
         "Asymmetric windows: a single **long** position is held across the long-test span, "
         "while **shorts** are rebalanced in rolling intervals (each with its own train + test) "
-        "inside the same span. Designed to capture long-horizon momentum with longs while harvesting "
-        "short-horizon reversals via shorts."
+        "inside the same span. Long-horizon momentum on the long side, short-horizon reversals "
+        "on the short side."
     )
 
-    with st.expander("📐 How this works"):
+    with st.expander("How this works"):
         st.markdown(
             "**Long side**: train and test windows derived from `T = test end date`.\n"
             "```\n"
@@ -1297,7 +1329,11 @@ def render_multiwindow_page():
 
     real_today = datetime.date.today()
 
-    st.sidebar.title("⚙️ Multi-Window Settings")
+    st.sidebar.markdown(
+        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
+        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Multi-window settings</div>',
+        unsafe_allow_html=True,
+    )
     test_end = st.sidebar.date_input(
         "Anchor (test end) date",
         value=real_today, max_value=real_today,
@@ -1365,28 +1401,30 @@ def render_multiwindow_page():
     timeline = go.Figure()
     timeline.add_trace(go.Scatter(
         x=[long_train_start, long_test_start], y=[1, 1], mode="lines",
-        line=dict(color="#9fb1c9", width=10), name="Long train", hoverinfo="skip",
+        line=dict(color=ui.COLORS["fg_faint"], width=8), name="Long train", hoverinfo="skip",
     ))
     timeline.add_trace(go.Scatter(
         x=[long_test_start, test_end], y=[1, 1], mode="lines",
-        line=dict(color="#34d399", width=14), name="Long test", hoverinfo="skip",
+        line=dict(color=ui.COLORS["gain"], width=14), name="Long held", hoverinfo="skip",
     ))
     for iv in intervals:
         timeline.add_trace(go.Scatter(
             x=[iv["train_start"], iv["test_start"]], y=[0.5, 0.5], mode="lines",
-            line=dict(color="#67809f", width=4), showlegend=False, hoverinfo="skip",
+            line=dict(color=ui.COLORS["fg_faint"], width=4), showlegend=False, hoverinfo="skip",
         ))
         timeline.add_trace(go.Scatter(
             x=[iv["test_start"], iv["test_end"]], y=[0.5, 0.5], mode="lines",
-            line=dict(color="#f87171", width=8), showlegend=False, hoverinfo="skip",
+            line=dict(color=ui.COLORS["loss"], width=8), showlegend=False, hoverinfo="skip",
         ))
     timeline.update_layout(
-        height=180, margin=dict(l=20, r=20, t=20, b=30),
-        yaxis=dict(showticklabels=False, range=[0, 1.5], fixedrange=True),
+        height=200, margin=dict(l=24, r=24, t=46, b=30),
+        yaxis=dict(showticklabels=False, range=[0.2, 1.4], fixedrange=True, showgrid=False, zeroline=False),
         xaxis_title="Date",
-        title="Window timeline (top: long, bottom: short cycles)",
+        title="Asymmetric timeline — top: long held, bottom: short cycles",
         showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
     )
+    ui.apply_chart_theme(timeline)
     st.plotly_chart(timeline, use_container_width=True)
 
     if not run_mw:
@@ -1479,16 +1517,24 @@ def render_multiwindow_page():
     total_inv = long_invested + short_usd  # short capital is recycled, so peak = $short_per_side
     total_ret = (total_pnl / total_inv * 100) if total_inv > 0 else 0.0
 
-    # ── headline metrics ────────────────────────────────────────────────────
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("💰 Total Inv $", f"${total_inv:,.0f}")
-    mc2.metric("Long P&L $", f"${long_pnl:+,.2f}")
-    mc3.metric("Short P&L $ (cycles)", f"${short_pnl:+,.2f}")
-    mc4.metric("Total P&L $", f"${total_pnl:+,.2f}")
-    mc5.metric("📈 Total Return %", f"{total_ret:+.2f}%")
+    # ── headline P&L hero ──────────────────────────────────────────────────
+    ui.pnl_card(
+        total_ret_pct=total_ret,
+        total_pnl=total_pnl,
+        total_inv=total_inv,
+        long_pnl=long_pnl,
+        short_pnl=short_pnl,
+    )
 
     # ── long basket ─────────────────────────────────────────────────────────
-    st.markdown("### 🟢 LONG basket (held entire long-test window)")
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">'
+        + ui.pill("HELD", "solid-long")
+        + '<span style="font-size:14px;font-weight:600;color:var(--fg-strong)">Long basket</span>'
+        + '<span style="font-size:11.5px;color:var(--fg-dim)">held the entire long-test window</span>'
+        + '</div>',
+        unsafe_allow_html=True,
+    )
     if longs.empty:
         st.info("No long positions.")
     else:
@@ -1500,43 +1546,57 @@ def render_multiwindow_page():
                    f"return {(long_pnl / long_invested * 100 if long_invested else 0):+.2f}%")
 
     # ── short cycles summary ────────────────────────────────────────────────
-    st.markdown("### 🔴 SHORT rolling cycles")
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">'
+        + ui.pill("ROTATION", "solid-short")
+        + '<span style="font-size:14px;font-weight:600;color:var(--fg-strong)">Short cycles</span>'
+        + '<span style="font-size:11.5px;color:var(--fg-dim)">rebalanced every short-test window</span>'
+        + '</div>',
+        unsafe_allow_html=True,
+    )
     cycle_df = pd.DataFrame(cycle_rows)
     st.dataframe(cycle_df, use_container_width=True, hide_index=True)
 
     bar = go.Figure()
-    colors = ["#34d399" if v >= 0 else "#f87171" for v in cycle_df["P&L $"]]
+    colors = [ui.COLORS["gain"] if v >= 0 else ui.COLORS["loss"] for v in cycle_df["P&L $"]]
     bar.add_trace(go.Bar(
         x=[f"#{c}" for c in cycle_df["Cycle"]],
         y=cycle_df["P&L $"],
         marker_color=colors,
-        text=[f"${v:+.2f}" for v in cycle_df["P&L $"]],
+        marker_line_width=0,
+        text=[f"${v:+,.0f}" for v in cycle_df["P&L $"]],
         textposition="outside",
     ))
-    bar.add_hline(y=0, line_color="gray", opacity=0.5)
+    bar.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.5)
     bar.update_layout(
         title="Short P&L by cycle ($)",
-        height=380, margin=dict(l=40, r=40, t=60, b=40),
+        height=340, margin=dict(l=44, r=44, t=56, b=40),
         yaxis_title="P&L $", xaxis_title="Cycle",
     )
+    ui.apply_chart_theme(bar)
     st.plotly_chart(bar, use_container_width=True)
 
     # ── equity curve (cumulative P&L) ───────────────────────────────────────
-    cum_pnl = cycle_df["P&L $"].cumsum() + long_pnl  # long realized at end, but for simplicity attribute upfront
     line = go.Figure()
     line.add_trace(go.Scatter(
         x=list(range(1, len(cycle_df) + 1)),
         y=cycle_df["P&L $"].cumsum(),
-        mode="lines+markers", name="Cumulative SHORT P&L",
-        line=dict(color="#f87171", width=3),
+        mode="lines+markers", name="Cumulative short P&L",
+        line=dict(color=ui.COLORS["loss"], width=3),
+        marker=dict(size=7),
     ))
-    line.add_hline(y=long_pnl, line_dash="dash", line_color="#34d399",
-                   annotation_text=f"Long P&L ${long_pnl:+.2f}", annotation_position="top right")
+    line.add_hline(
+        y=long_pnl, line_dash="dash", line_color=ui.COLORS["gain"],
+        annotation_text=f"Long P&L ${long_pnl:+,.0f}",
+        annotation_position="top right",
+        annotation_font_color=ui.COLORS["gain"],
+    )
     line.update_layout(
         title="Cumulative short P&L vs realized long P&L",
         xaxis_title="Cycle", yaxis_title="$ P&L",
-        height=360, margin=dict(l=40, r=40, t=60, b=40),
+        height=340, margin=dict(l=44, r=44, t=56, b=40),
     )
+    ui.apply_chart_theme(line)
     st.plotly_chart(line, use_container_width=True)
 
     # ── per-cycle baskets ───────────────────────────────────────────────────
@@ -1572,7 +1632,7 @@ def render_multiwindow_page():
 
 
 def render_walkforward_page():
-    st.title("🔁 Walk-Forward Backtest")
+    ui.page_header("walkforward")
     st.markdown(
         "Roll a fixed train→test window forward through history. Each cycle: train on the "
         "preceding window, build the portfolio, hold across the test window, record P&L. "
@@ -1581,7 +1641,11 @@ def render_walkforward_page():
     )
 
     real_today = datetime.date.today()
-    st.sidebar.title("⚙️ Walk-Forward Settings")
+    st.sidebar.markdown(
+        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
+        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Walk-forward settings</div>',
+        unsafe_allow_html=True,
+    )
 
     start_date = st.sidebar.date_input(
         "Start date", value=real_today - relativedelta(years=2), max_value=real_today,
@@ -1745,9 +1809,9 @@ def render_walkforward_page():
 
     # ── three-mode summary ───────────────────────────────────────────────
     modes = [
-        {"key": "ls", "label": "Long + Short", "color": "#1f77b4"},
-        {"key": "l",  "label": "Long only",    "color": "#2ca02c"},
-        {"key": "s",  "label": "Short only",   "color": "#d62728"},
+        {"key": "ls", "label": "Long + Short", "color": ui.COLORS["c1"]},
+        {"key": "l",  "label": "Long only",    "color": ui.COLORS["gain"]},
+        {"key": "s",  "label": "Short only",   "color": ui.COLORS["loss"]},
     ]
     summary: dict[str, dict] = {}
     for m in modes:
@@ -1769,46 +1833,66 @@ def render_walkforward_page():
 
     best_mode_key = max(summary, key=lambda k: summary[k]["cum_ret_pct"])
 
-    st.markdown(f"#### 📦 Starting capital: **${starting_usd:,.2f}** · {len(df)} cycles")
+    # mode palette matches the design system
+    MODE_PALETTE = {
+        "ls": ui.COLORS["c1"],
+        "l":  ui.COLORS["gain"],
+        "s":  ui.COLORS["loss"],
+    }
+
+    st.markdown(
+        f"""
+        <div style="display:flex;align-items:center;gap:12px;margin:6px 0 12px;">
+          <span class="qrl-eyebrow" style="margin:0;">Starting capital</span>
+          <span class="qrl-num" style="font-size:18px;font-weight:600;color:var(--fg-strong);">${starting_usd:,.2f}</span>
+          <span style="font-size:11.5px;color:var(--fg-dim);">across {len(df)} cycles</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     bcols = st.columns(3)
     for col, m in zip(bcols, modes):
         s = summary[m["key"]]
         ending = s["ending_usd"]
-        pnl = ending - starting_usd
-        accent = "#34d399" if pnl >= 0 else "#f87171"
-        bg = "#1a4d2e" if pnl >= 0 else "#5a1d1d"
-        crown = " 🏆" if m["key"] == best_mode_key else ""
-        col.markdown(
-            f"""
-            <div style="background:{bg};border-radius:12px;padding:18px;border-top:4px solid {m['color']};">
-              <div style="font-size:14px;color:#9fb1c9;letter-spacing:1px;">{m['label'].upper()}{crown}</div>
-              <div style="font-size:32px;font-weight:800;color:{accent};margin-top:4px;">${ending:,.2f}</div>
-              <div style="font-size:18px;color:{accent};">{s['cum_ret_pct']:+.2f}% &nbsp; ({pnl:+,.2f} $)</div>
-              <div style="font-size:13px;color:#9fb1c9;margin-top:8px;">
-                Win rate {s['win_rate']:.0f}% · Avg/cyc {s['avg_per_cycle']:+.2f}% · MaxDD {s['max_dd_pct']:.2f}%
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with col:
+            ui.mode_card(
+                name=m["label"],
+                color=MODE_PALETTE[m["key"]],
+                ending_usd=ending,
+                ret_pct=s["cum_ret_pct"],
+                start_usd=starting_usd,
+                win_rate=s["win_rate"],
+                avg_per_cycle=s["avg_per_cycle"],
+                max_dd=s["max_dd_pct"],
+                winner=(m["key"] == best_mode_key),
+            )
 
     # ── overlaid equity curves ───────────────────────────────────────────
     eq_fig = go.Figure()
     for m in modes:
+        is_winner = m["key"] == best_mode_key
         eq_fig.add_trace(go.Scatter(
             x=df["test_end"], y=df[f"{m['key']}_end"],
             mode="lines+markers", name=m["label"],
-            line=dict(color=m["color"], width=2),
+            line=dict(color=m["color"], width=3 if is_winner else 2),
+            marker=dict(size=6 if is_winner else 4),
+            opacity=1.0 if is_winner else 0.78,
             hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>$%{{y:,.2f}}<extra></extra>",
         ))
-    eq_fig.add_hline(y=starting_usd, line_dash="dash", line_color="gray", opacity=0.6,
-                      annotation_text=f"start ${starting_usd:,.0f}", annotation_position="left")
+    eq_fig.add_hline(
+        y=starting_usd, line_dash="dash", line_color=ui.COLORS["fg_dim"], opacity=0.6,
+        annotation_text=f"start ${starting_usd:,.0f}",
+        annotation_position="left",
+        annotation_font_color=ui.COLORS["fg_dim"],
+    )
     eq_fig.update_layout(
-        title=f"Equity Curves — Long+Short vs Long-only vs Short-only (start ${starting_usd:,.0f})",
-        xaxis_title="Test-window end", yaxis_title="Account Value $",
-        height=440, margin=dict(l=40, r=40, t=60, b=40),
+        title="Equity curves — three portfolio modes compounded in parallel",
+        xaxis_title="Test-window end", yaxis_title="Account value $",
+        height=420, margin=dict(l=44, r=44, t=56, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    ui.apply_chart_theme(eq_fig)
     st.plotly_chart(eq_fig, use_container_width=True)
 
     # ── per-cycle return % grouped bars ──────────────────────────────────
@@ -1817,16 +1901,17 @@ def render_walkforward_page():
         ret_col = f"{m['key']}_return_pct"
         bar_fig.add_trace(go.Bar(
             x=df["test_end"], y=df[ret_col], name=m["label"],
-            marker_color=m["color"],
+            marker_color=m["color"], marker_line_width=0,
             hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
         ))
-    bar_fig.add_hline(y=0, line_color="gray", opacity=0.6)
+    bar_fig.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.5)
     bar_fig.update_layout(
-        title="Per-Cycle Return % — by mode",
-        barmode="group", height=380, yaxis_title="Return %",
-        margin=dict(l=40, r=40, t=60, b=40),
+        title="Per-cycle return % — by mode",
+        barmode="group", height=360, yaxis_title="Return %",
+        margin=dict(l=44, r=44, t=56, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    ui.apply_chart_theme(bar_fig)
     st.plotly_chart(bar_fig, use_container_width=True)
 
     # ── per-cycle table ─────────────────────────────────────────────────
@@ -1849,10 +1934,9 @@ def render_walkforward_page():
     )
 
     # ── per-cycle inspector ───────────────────────────────────────────────
-    st.markdown("### 🔍 Inspect a cycle")
-    st.caption(
-        "Pick a cycle to see exactly which names were picked, predicted vs actual, weights, and per-name P&L. "
-        "Use this to diagnose **why** a cycle won or lost."
+    ui.section_header(
+        "Cycle inspector",
+        "pick a cycle to see picks, predicted vs actual, weights, per-name P&L",
     )
 
     for idx, r in enumerate(results, start=1):
@@ -1878,20 +1962,32 @@ def render_walkforward_page():
 
     bcol1, bcol2 = st.columns(2)
     with bcol1:
-        st.markdown(f"**🟢 LONG basket — {len(long_b)} positions**")
+        st.markdown(
+            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
+            + ui.pill("LONG", "solid-long")
+            + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(long_b)} positions</span>'
+            + '</div>',
+            unsafe_allow_html=True,
+        )
         if long_b.empty:
             st.info("No long positions this cycle.")
         else:
             wins = int((long_b["match"]).sum())
-            st.caption(f"Hit rate: **{wins}/{len(long_b)}** correct ({wins/len(long_b)*100:.0f}%)")
+            st.caption(f"Hit rate **{wins}/{len(long_b)}** correct ({wins/len(long_b)*100:.0f}%)")
             st.dataframe(long_b[pred_cols], use_container_width=True, hide_index=True)
     with bcol2:
-        st.markdown(f"**🔴 SHORT basket — {len(short_b)} positions**")
+        st.markdown(
+            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
+            + ui.pill("SHORT", "solid-short")
+            + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(short_b)} positions</span>'
+            + '</div>',
+            unsafe_allow_html=True,
+        )
         if short_b.empty:
             st.info("No short positions this cycle.")
         else:
             wins = int((short_b["match"]).sum())
-            st.caption(f"Hit rate: **{wins}/{len(short_b)}** correct ({wins/len(short_b)*100:.0f}%)")
+            st.caption(f"Hit rate **{wins}/{len(short_b)}** correct ({wins/len(short_b)*100:.0f}%)")
             st.dataframe(short_b[pred_cols], use_container_width=True, hide_index=True)
 
     if not long_b.empty or not short_b.empty:
@@ -1913,24 +2009,56 @@ def render_walkforward_page():
 
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
-st.sidebar.title("⚙️ Settings")
+# Brand header inside the rail
+st.sidebar.markdown(
+    """
+    <div style="display:flex; align-items:center; gap:11px; padding:14px 6px 14px;">
+      <div style="width:30px; height:30px; border-radius:8px;
+                  background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+                  display:grid; place-items:center; color: var(--on-accent);
+                  font-weight:700; font-size:14px;
+                  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 14px var(--accent-ghost);">◇</div>
+      <div style="line-height:1.15;">
+        <div style="font-weight:600; font-size:14px; color: var(--fg-strong); letter-spacing:-0.02em;">Quantum<span style="color: var(--accent-strong);">Risk</span></div>
+        <div style="font-size:10px; color: var(--fg-dim); font-weight:500;
+                    letter-spacing:0.07em; text-transform:uppercase;">Lab</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.markdown(
+    '<div style="font-size:10px; text-transform:uppercase; letter-spacing:.09em; '
+    'color: var(--fg-faint); font-weight:700; padding:8px 6px 6px;">Analysis</div>',
+    unsafe_allow_html=True,
+)
+
+PAGE_LABELS = {
+    "Dashboard": "dashboard",
+    "Backtest Validator": "validator",
+    "Multi-Window Backtest": "multiwindow",
+    "Walk-Forward": "walkforward",
+}
 
 page = st.sidebar.radio(
-    "📑 Page",
-    ["📊 Dashboard", "🔬 Backtest Validator", "🔄 Multi-Window Backtest", "🔁 Walk-Forward"],
+    "Page",
+    list(PAGE_LABELS.keys()),
     index=0,
+    label_visibility="collapsed",
 )
+PAGE_KEY = PAGE_LABELS[page]
 st.sidebar.markdown("---")
 
-if page == "🔬 Backtest Validator":
+if page == "Backtest Validator":
     render_backtest_page()
     st.stop()
 
-if page == "🔄 Multi-Window Backtest":
+if page == "Multi-Window Backtest":
     render_multiwindow_page()
     st.stop()
 
-if page == "🔁 Walk-Forward":
+if page == "Walk-Forward":
     render_walkforward_page()
     st.stop()
 
@@ -2116,7 +2244,9 @@ def build_chart(
             x=prices.index,
             y=prices.values,
             name=f"{tk} Price",
-            line=dict(color="#1f77b4", width=2),
+            line=dict(color=ui.COLORS["fg_muted"], width=2),
+            fill="tozeroy",
+            fillcolor="rgba(45, 212, 191, 0.06)",
         ),
         secondary_y=False,
     )
@@ -2127,7 +2257,7 @@ def build_chart(
                 x=exp_fitted.index,
                 y=exp_fitted.values,
                 name="Exp. Regression",
-                line=dict(color="#2ca02c", width=2, dash="dash"),
+                line=dict(color=ui.COLORS["accent"], width=2, dash="dash"),
             ),
             secondary_y=False,
         )
@@ -2177,15 +2307,16 @@ def build_chart(
         if snippets:
             title_parts.append(", ".join(snippets))
 
-    chart_height = 420 if compare_mode else 560
+    chart_height = 420 if compare_mode else 540
     fig.update_layout(
-        title="  |  ".join(title_parts),
+        title="  ·  ".join(title_parts),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=chart_height,
-        margin=dict(l=40, r=40, t=80, b=40),
+        margin=dict(l=44, r=44, t=68, b=40),
     )
     fig.update_xaxes(title_text="Date")
+    ui.apply_chart_theme(fig)
 
     p_opts: dict = dict(title_text="Price ($)")
     if not price_auto and price_min is not None and price_max is not None:
@@ -2211,7 +2342,8 @@ def render_summary(
     full_period_results: dict[str, float],
 ):
     """Render summary-statistic metrics into *container*."""
-    container.subheader("Summary Statistics")
+    with container:
+        ui.eyebrow("Summary statistics")
 
     period_return = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
     annual_vol = returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
@@ -2287,7 +2419,8 @@ def render_manual_calcs(
     """Render manual-calculation expanders into *container*."""
     if not selected_ratios:
         return
-    container.markdown("### Manual Calculation Inputs")
+    with container:
+        ui.section_header("Math inspector", "formula, inputs, result — per selected ratio")
     for selected_ratio in selected_ratios:
         full_ratio_value = full_ratio_values[selected_ratio]
         with container.expander(f"📐 {selected_ratio} — formula variables", expanded=False):
@@ -2385,8 +2518,9 @@ def render_exp_regression(container, prices: pd.Series, ratio_value: float):
     if fitted_series is None:
         return None
 
-    container.markdown("---")
-    container.subheader("Exponential Regression Analysis")
+    with container:
+        st.markdown('<hr class="qrl-divider" />', unsafe_allow_html=True)
+        ui.section_header("Exponential regression", "log-linear fit · composite score")
 
     current_price = float(prices.iloc[-1])
     exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1)))
@@ -2478,6 +2612,12 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     if show_exp_reg:
         _, _, _, exp_fitted, _, _ = calc_exp_regression(prices)
 
+    # Ticker header card
+    last_price = float(prices.iloc[-1])
+    period_chg = (float(prices.iloc[-1]) / float(prices.iloc[0]) - 1.0) * 100.0
+    with container:
+        ui.ticker_head(tk, f"{period_label} period", last_price, period_chg)
+
     rolling_res, full_res = compute_ratios(prices, returns, br)
     fig = build_chart(tk, prices, rolling_res, full_res, exp_fitted=exp_fitted)
     container.plotly_chart(fig, use_container_width=True)
@@ -2495,7 +2635,7 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
 
 # ── main area ───────────────────────────────────────────────────────────────
 
-st.title("📈 Stock Risk / Return Ratio Dashboard")
+ui.page_header("dashboard")
 
 if not ticker:
     st.warning("Please enter a ticker symbol in the sidebar.")
