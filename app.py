@@ -11,7 +11,7 @@ from dateutil.relativedelta import relativedelta
 import backtest_core as bc
 
 st.set_page_config(
-    page_title="Risk Return Ratio Project",
+    page_title="Data-Driven Risk-Adjusted Performance Analysis",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1750,7 +1750,7 @@ def render_walkforward_page():
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
 # Brand header inside the rail
-st.sidebar.title("📈 Risk Return Ratio Project")
+st.sidebar.title("📈 Data-Driven Risk-Adjusted Performance Analysis")
 st.sidebar.markdown("**Analysis**")
 
 PAGE_LABELS = {
