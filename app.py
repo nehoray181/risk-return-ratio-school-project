@@ -9,15 +9,100 @@ from plotly.subplots import make_subplots
 from dateutil.relativedelta import relativedelta
 
 import backtest_core as bc
-import ui
 
 st.set_page_config(
-    page_title="QuantumRisk Lab — Risk/Return Dashboard",
-    page_icon="◇",
+    page_title="Risk Return Ratio Project",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-ui.inject_styles()
+
+
+# ── minimal display helpers (plain Streamlit, no custom CSS) ─────────────────
+# The dark look comes from .streamlit/config.toml; these just give charts a
+# small, consistent palette and a few thin wrappers over native widgets.
+COLORS = {
+    "accent":    "#2DD4BF",
+    "gain":      "#2EBD78",
+    "loss":      "#F0616D",
+    "fg_muted":  "#97A1B4",
+    "fg_dim":    "#6B7585",
+    "fg_faint":  "#4B5566",
+    "c1": "#2DD4BF",
+    "c2": "#7C9CFF",
+    "c3": "#E8B339",
+    "c4": "#C792EA",
+    "c5": "#5FD0E8",
+}
+
+RATIO_PALETTE = {
+    "Sharpe Ratio":      COLORS["c1"],
+    "Sortino Ratio":     COLORS["c2"],
+    "Treynor Ratio":     COLORS["c3"],
+    "Information Ratio":  COLORS["c4"],
+    "Calmar Ratio":      COLORS["c5"],
+}
+
+_PAGE_TITLES = {
+    "validator":   "Backtest Validator",
+    "walkforward": "Walk-Forward",
+    "dashboard":   "Risk / Return Dashboard",
+}
+
+
+def apply_chart_theme(fig, *, height=None):
+    """Keep Plotly charts transparent so they sit on Streamlit's theme."""
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+    if height is not None:
+        fig.update_layout(height=height)
+    return fig
+
+
+def page_header(key, *, override_title=None, override_sub=None):
+    st.header(override_title or _PAGE_TITLES.get(key, key))
+    if override_sub:
+        st.caption(override_sub)
+
+
+def section_header(title, sub=None, *, container=None):
+    tgt = container or st
+    tgt.subheader(title)
+    if sub:
+        tgt.caption(sub)
+
+
+def eyebrow(text, *, container=None):
+    (container or st).caption(text)
+
+
+def divider(container=None):
+    (container or st).divider()
+
+
+def featured_card(*, title, big_value, big_caption, secondary_value,
+                  secondary_caption, vs_text):
+    st.markdown(f"**🏆 Best formula — {title}**")
+    st.metric(big_caption, big_value, vs_text)
+    st.metric(secondary_caption, secondary_value)
+
+
+def ticker_head(symbol, name, price, change_pct, *, container=None):
+    (container or st).metric(
+        f"{symbol} · {name}", f"${price:,.2f}", f"{change_pct:+.2f}%"
+    )
+
+
+def mode_card(*, name, color, ending_usd, ret_pct, start_usd, win_rate,
+              avg_per_cycle, max_dd, winner=False):
+    st.metric(
+        f"{'🏆 ' if winner else ''}{name}",
+        f"${ending_usd:,.0f}",
+        f"{ret_pct:+.2f}% from ${start_usd:,.0f}",
+    )
+    st.caption(
+        f"Win rate {win_rate:.0f}% · Avg/cyc {avg_per_cycle:+.2f}% · "
+        f"Max DD {max_dd:.2f}%"
+    )
 
 PERIOD_OPTIONS = {
     "1M": "1mo",
@@ -38,7 +123,7 @@ RATIO_OPTIONS = [
     "Calmar Ratio",
 ]
 
-RATIO_COLORS = ui.RATIO_PALETTE
+RATIO_COLORS = RATIO_PALETTE
 
 TRADING_DAYS_PER_YEAR = 252
 
@@ -278,12 +363,16 @@ DEFAULT_ETF_LIST = [
 ]
 
 
-FACTOR_KEYS = ["diff", "r", "b", "sharpe"]
+FACTOR_KEYS = ["diff", "r", "b", "sharpe", "sortino", "calmar", "treynor", "information"]
 FACTOR_LABELS = {
     "diff": "(ExpReg − Price)",
     "r": "r",
     "b": "b",
     "sharpe": "Sharpe",
+    "sortino": "Sortino",
+    "calmar": "Calmar",
+    "treynor": "Treynor",
+    "information": "Information",
 }
 
 
@@ -293,8 +382,14 @@ def compute_factors(
     test_start: datetime.date,
     test_end: datetime.date,
     rf_daily_bt: float,
+    bench_ret: pd.Series | None = None,
 ) -> dict | None:
-    """Fetch one ticker, return raw factors + actuals. Formula-agnostic."""
+    """Fetch one ticker, return raw factors + actuals. Formula-agnostic.
+
+    All risk-adjusted ratios are measured on the train window. Treynor and
+    Information are computed against the benchmark daily returns (``bench_ret``)
+    sliced to the same train window; they are NaN when no benchmark is given.
+    """
     df = fetch_data_daterange(tk, str(train_start), str(test_end))
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -315,16 +410,34 @@ def compute_factors(
 
     diff = float(fitted.iloc[-1]) - float(train_prices.iloc[-1])
     train_ret = train_prices.pct_change().dropna()
-    sharpe = calc_full_sharpe(train_ret, rf_daily_bt)
     train_total_ret = float(train_prices.iloc[-1] / train_prices.iloc[0] - 1)
     actual_ret = float(test_prices.iloc[-1] / test_prices.iloc[0] - 1)
+
+    sharpe = calc_full_sharpe(train_ret, rf_daily_bt)
+    sortino = calc_full_sortino(train_ret, rf_daily_bt)
+    calmar = calc_full_calmar(train_prices, rf_daily_bt)
+
+    if bench_ret is not None:
+        bench_train_ret = bench_ret[bench_ret.index < split_ts]
+        treynor = calc_full_treynor(train_ret, bench_train_ret, rf_daily_bt)
+        information = calc_full_information(train_ret, bench_train_ret)
+    else:
+        treynor = np.nan
+        information = np.nan
+
+    def _clean(x: float) -> float:
+        return float(x) if not np.isnan(x) else np.nan
 
     return {
         "ticker": tk,
         "diff": diff,
         "r": float(r),
         "b": float(b),
-        "sharpe": float(sharpe) if not np.isnan(sharpe) else np.nan,
+        "sharpe": _clean(sharpe),
+        "sortino": _clean(sortino),
+        "calmar": _clean(calmar),
+        "treynor": _clean(treynor),
+        "information": _clean(information),
         "train_total_ret": train_total_ret,
         "actual_ret": actual_ret,
     }
@@ -360,13 +473,20 @@ def build_result_row(factors: dict, components: dict[str, bool]) -> dict:
         pred_dir = "UP" if score > 0 else ("DOWN" if score < 0 else "FLAT")
     actual_dir = "UP" if actual_ret > 0 else ("DOWN" if actual_ret < 0 else "FLAT")
     match = pred_dir == actual_dir and pred_dir != "FLAT"
+    def _r3(x):
+        return round(float(x), 3) if x is not None and not np.isnan(x) else None
+
     return {
         "Ticker": factors["ticker"],
         "Train Δ%": round(factors["train_total_ret"] * 100, 2),
         "diff": round(factors["diff"], 4),
         "r": round(factors["r"], 4),
         "b": round(factors["b"], 6),
-        "Sharpe": round(factors["sharpe"], 3) if not np.isnan(factors["sharpe"]) else None,
+        "Sharpe": _r3(factors["sharpe"]),
+        "Sortino": _r3(factors["sortino"]),
+        "Calmar": _r3(factors["calmar"]),
+        "Treynor": _r3(factors["treynor"]),
+        "Information": _r3(factors["information"]),
         "Score": round(score, 6) if not np.isnan(score) else None,
         "Predicted": pred_dir,
         "Actual %": round(actual_ret * 100, 2),
@@ -388,20 +508,24 @@ def summarize(df: pd.DataFrame) -> dict:
     }
 
 
-DEFAULT_FORMULAS = pd.DataFrame([
-    {"Name": "diff×r×b",       "diff": True,  "r": True,  "b": True,  "sharpe": False},
-    {"Name": "Sharpe only",    "diff": False, "r": False, "b": False, "sharpe": True},
-    {"Name": "diff×r×b×Sharpe","diff": True,  "r": True,  "b": True,  "sharpe": True},
-    {"Name": "diff×Sharpe",    "diff": True,  "r": False, "b": False, "sharpe": True},
-])
+# Fixed formula set — always evaluated, not user-editable.
+# Each formula's Score = product of its checked factors (sign → direction).
+FIXED_FORMULAS = [
+    {"name": "diff × r × b", "components": {"diff": True, "r": True, "b": True}},
+    {"name": "Sharpe",       "components": {"sharpe": True}},
+    {"name": "Sortino",      "components": {"sortino": True}},
+    {"name": "Calmar",       "components": {"calmar": True}},
+    {"name": "Treynor",      "components": {"treynor": True}},
+    {"name": "Information",  "components": {"information": True}},
+]
 
 
 def render_backtest_page():
-    ui.page_header("validator")
+    page_header("validator")
     st.markdown(
         "Train on an earlier window, test predictions against the recent window. "
-        "Define multiple **score formulas**; each is evaluated against the same factor data, "
-        "so you can compare which formula predicts direction best."
+        "Six fixed **score formulas** are evaluated against the same factor data, "
+        "so you can compare which one predicts direction best."
     )
 
     with st.expander("Variables & formulas — full methodology"):
@@ -427,15 +551,19 @@ def render_backtest_page():
             "b         = slope (daily log-growth rate)\n"
             "diff      = ExpReg(last train day) − P_train(last train day)\n"
             "```\n"
-            "**Risk-adjusted return on train window**\n"
+            "**Risk-adjusted ratios on train window** (Rb = benchmark ^GSPC daily returns)\n"
             "```\n"
-            "Sharpe = (mean(R_train) − Rf_daily) / std(R_train) × √252\n"
+            "Sharpe      = (mean(R_train) − Rf_daily) / std(R_train)            × √252\n"
+            "Sortino     = (mean(R_train) − Rf_daily) / downside_std(R_train)   × √252\n"
+            "Calmar      = annualized_return(P_train) / max_drawdown(P_train)\n"
+            "Treynor     = (mean(R_train) − Rf_daily) / beta(R_train, Rb)       × 252\n"
+            "Information = mean(R_train − Rb) / std(R_train − Rb)               × √252\n"
             "```\n"
-            "**Score** (product of selected factors; factors not chosen are skipped)\n"
+            "**Six fixed formulas** (always evaluated; not user-editable)\n"
             "```\n"
-            "Score = ∏  factor_i      for factor_i ∈ {diff, r, b, Sharpe} that you check\n"
-            "If a chosen factor is NaN → ticker score is NaN → Predicted = FLAT for that formula.\n"
-            "If no factor is checked   → Score falls back to b (slope sign).\n"
+            "diff × r × b   |   Sharpe   |   Sortino   |   Calmar   |   Treynor   |   Information\n"
+            "Score = ∏ factor_i for the formula's factors (a single ratio for the ratio formulas).\n"
+            "If a factor is NaN → ticker score is NaN → Predicted = FLAT for that formula.\n"
             "```\n"
             "**Direction & accuracy** (per ticker, per formula)\n"
             "```\n"
@@ -481,11 +609,7 @@ def render_backtest_page():
 
     real_today = datetime.date.today()
 
-    st.sidebar.markdown(
-        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
-        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Backtest settings</div>',
-        unsafe_allow_html=True,
-    )
+    st.sidebar.markdown("### Backtest settings")
     st.sidebar.markdown("**Time Windows**")
     test_end = st.sidebar.date_input(
         "Test end date",
@@ -569,28 +693,13 @@ def render_backtest_page():
 
     st.markdown("### 🧪 Score Formulas")
     st.caption(
-        "Each row defines one formula. Score = product of checked factors. "
-        "Sign of the score → predicted direction (UP / DOWN). "
-        "If a checked factor is NaN for a ticker (e.g. zero downside vol → Sortino NaN), "
-        "the ticker is marked FLAT for that formula. Add/remove rows freely."
+        "Six fixed formulas are evaluated on every run. Score = product of the formula's "
+        "factors; the sign of the score sets the predicted direction (UP / DOWN). "
+        "If a factor is NaN for a ticker (e.g. zero downside vol → Sortino NaN), that ticker "
+        "is FLAT for the formula."
     )
-
-    if "bt_formulas" not in st.session_state:
-        st.session_state.bt_formulas = DEFAULT_FORMULAS.copy()
-
-    formulas_df = st.data_editor(
-        st.session_state.bt_formulas,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Name": st.column_config.TextColumn("Formula Name", required=True),
-            "diff": st.column_config.CheckboxColumn("(ExpReg−Price)"),
-            "r": st.column_config.CheckboxColumn("r"),
-            "b": st.column_config.CheckboxColumn("b"),
-            "sharpe": st.column_config.CheckboxColumn("Sharpe"),
-        },
-        key="bt_formulas_editor",
+    st.markdown(
+        " &nbsp; ".join(f"`{fm['name']}`" for fm in FIXED_FORMULAS)
     )
 
     if run:
@@ -600,13 +709,28 @@ def render_backtest_page():
             st.error("No tickers provided.")
             return
 
+        # Benchmark for Treynor / Information (train-window beta & active return).
+        BENCH_TICKER = "^GSPC"
+        bench_ret = None
+        try:
+            bench_df = fetch_data_daterange(BENCH_TICKER, str(train_start), str(today))
+            if bench_df is not None and not bench_df.empty and "Close" in bench_df.columns:
+                bench_ret = bench_df["Close"].dropna().pct_change().dropna()
+        except Exception:  # noqa: BLE001
+            bench_ret = None
+        if bench_ret is None:
+            st.warning(
+                f"Could not fetch benchmark **{BENCH_TICKER}** — Treynor & Information "
+                "will be FLAT for all tickers this run."
+            )
+
         factors_list: list[dict] = []
         failed: list[str] = []
         progress = st.progress(0.0, text="Fetching data...")
         for i, tk in enumerate(tickers, start=1):
             progress.progress(i / len(tickers), text=f"Processing {tk} ({i}/{len(tickers)})")
             try:
-                f = compute_factors(tk, train_start, test_start, today, rf_daily_bt)
+                f = compute_factors(tk, train_start, test_start, today, rf_daily_bt, bench_ret)
             except Exception as exc:  # noqa: BLE001
                 f = None
                 failed.append(f"{tk} ({exc.__class__.__name__})")
@@ -631,7 +755,7 @@ def render_backtest_page():
         }
 
     if "bt_factors_list" not in st.session_state:
-        st.info("Configure tickers, windows, and formulas, then click **Run Backtest** in the sidebar.")
+        st.info("Configure tickers and windows, then click **Run Backtest** in the sidebar.")
         return
 
     factors_list = st.session_state.bt_factors_list
@@ -652,14 +776,10 @@ def render_backtest_page():
         return
 
     formulas = [
-        {"name": str(row["Name"]).strip() or f"Formula {i+1}",
-         "components": {k: bool(row.get(k, False)) for k in FACTOR_KEYS}}
-        for i, row in formulas_df.iterrows()
-        if str(row.get("Name", "")).strip()
+        {"name": fm["name"],
+         "components": {k: bool(fm["components"].get(k, False)) for k in FACTOR_KEYS}}
+        for fm in FIXED_FORMULAS
     ]
-    if not formulas:
-        st.error("Define at least one formula with a name.")
-        return
 
     per_formula: dict[str, pd.DataFrame] = {}
     summaries: list[dict] = []
@@ -680,12 +800,12 @@ def render_backtest_page():
 
     summary_df = pd.DataFrame(summaries).sort_values("Accuracy %", ascending=False).reset_index(drop=True)
 
-    ui.section_header("Formula comparison", "scored by directional accuracy on the test window")
+    section_header("Formula comparison", "scored by directional accuracy on the test window")
 
     best = summary_df.iloc[0]
     feat_col, board_col = st.columns([1.1, 2], gap="medium")
     with feat_col:
-        ui.featured_card(
+        featured_card(
             title=str(best["Formula"]),
             big_value=f"{best['Accuracy %']:.1f}%",
             big_caption="directional accuracy",
@@ -697,7 +817,7 @@ def render_backtest_page():
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
     bar = go.Figure()
-    colors = [ui.COLORS["accent"] if i == 0 else ui.COLORS["fg_muted"] for i in range(len(summary_df))]
+    colors = [COLORS["accent"] if i == 0 else COLORS["fg_muted"] for i in range(len(summary_df))]
     bar.add_trace(go.Bar(
         x=summary_df["Formula"],
         y=summary_df["Accuracy %"],
@@ -706,15 +826,15 @@ def render_backtest_page():
         marker_color=colors,
         marker_line_width=0,
     ))
-    bar.add_hline(y=50, line_dash="dash", line_color=ui.COLORS["fg_dim"], opacity=0.7,
+    bar.add_hline(y=50, line_dash="dash", line_color=COLORS["fg_dim"], opacity=0.7,
                   annotation_text="50% (coin flip)", annotation_position="right",
-                  annotation_font_color=ui.COLORS["fg_dim"])
+                  annotation_font_color=COLORS["fg_dim"])
     bar.update_layout(
         title="Accuracy by Formula", height=340,
         yaxis_title="Accuracy %", xaxis_title="",
         margin=dict(l=44, r=44, t=56, b=40),
     )
-    ui.apply_chart_theme(bar)
+    apply_chart_theme(bar)
     st.plotly_chart(bar, use_container_width=True)
 
     if failed:
@@ -817,22 +937,22 @@ def render_backtest_page():
                     x=valid["Score"], y=valid["Actual %"],
                     mode="markers+text",
                     text=valid["Ticker"], textposition="top center",
-                    textfont=dict(family="IBM Plex Mono", size=10, color=ui.COLORS["fg_muted"]),
+                    textfont=dict(family="IBM Plex Mono", size=10, color=COLORS["fg_muted"]),
                     marker=dict(
                         size=11,
-                        color=[ui.COLORS["gain"] if m == "✅" else ui.COLORS["loss"] for m in valid["Match"]],
+                        color=[COLORS["gain"] if m == "✅" else COLORS["loss"] for m in valid["Match"]],
                         line=dict(width=0),
                     ),
                 ))
-                scatter.add_hline(y=0, line_dash="dash", line_color=ui.COLORS["fg_faint"], opacity=0.6)
-                scatter.add_vline(x=0, line_dash="dash", line_color=ui.COLORS["fg_faint"], opacity=0.6)
+                scatter.add_hline(y=0, line_dash="dash", line_color=COLORS["fg_faint"], opacity=0.6)
+                scatter.add_vline(x=0, line_dash="dash", line_color=COLORS["fg_faint"], opacity=0.6)
                 scatter.update_layout(
                     title="Score vs actual return — green = correct call, red = miss",
                     xaxis_title=f"Score ({fname})",
                     yaxis_title="Actual return %",
                     height=420, margin=dict(l=44, r=44, t=56, b=40),
                 )
-                ui.apply_chart_theme(scatter)
+                apply_chart_theme(scatter)
                 st.plotly_chart(scatter, use_container_width=True)
 
             st.markdown("#### 💼 Portfolio Construction")
@@ -946,13 +1066,7 @@ def render_backtest_page():
 
             pcol1, pcol2 = st.columns(2)
             with pcol1:
-                st.markdown(
-                    '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
-                    + ui.pill("LONG", "solid-long")
-                    + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(long_pf)} positions</span>'
-                    + '</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f"**🟢 LONG** — {len(long_pf)} positions")
                 if not long_pf.empty:
                     zeroed = int((long_pf["Weight"] == 0).sum())
                     if zeroed:
@@ -965,13 +1079,7 @@ def render_backtest_page():
                 else:
                     st.info("No long positions.")
             with pcol2:
-                st.markdown(
-                    '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
-                    + ui.pill("SHORT", "solid-short")
-                    + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(short_pf)} positions</span>'
-                    + '</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f"**🔴 SHORT** — {len(short_pf)} positions")
                 if not short_pf.empty:
                     zeroed = int((short_pf["Weight"] == 0).sum())
                     if zeroed:
@@ -1189,13 +1297,13 @@ def render_backtest_page():
         bar_pf.add_trace(go.Bar(
             name="Long P&L",
             x=pf_compare_df["Formula"], y=pf_compare_df["Long P&L $"],
-            marker_color=ui.COLORS["gain"],
+            marker_color=COLORS["gain"],
             marker_line_width=0,
         ))
         bar_pf.add_trace(go.Bar(
             name="Short P&L",
             x=pf_compare_df["Formula"], y=pf_compare_df["Short P&L $"],
-            marker_color=ui.COLORS["loss"],
+            marker_color=COLORS["loss"],
             marker_line_width=0,
         ))
         bar_pf.update_layout(
@@ -1204,11 +1312,11 @@ def render_backtest_page():
             yaxis_title="P&L $", xaxis_title="",
             height=360, margin=dict(l=44, r=44, t=56, b=40),
         )
-        ui.apply_chart_theme(bar_pf)
+        apply_chart_theme(bar_pf)
         st.plotly_chart(bar_pf, use_container_width=True)
 
         bar_ret = go.Figure()
-        colors = [ui.COLORS["gain"] if v >= 0 else ui.COLORS["loss"] for v in pf_compare_df["Total Return %"]]
+        colors = [COLORS["gain"] if v >= 0 else COLORS["loss"] for v in pf_compare_df["Total Return %"]]
         bar_ret.add_trace(go.Bar(
             x=pf_compare_df["Formula"], y=pf_compare_df["Total Return %"],
             marker_color=colors,
@@ -1216,13 +1324,13 @@ def render_backtest_page():
             text=[f"{v:.2f}%" for v in pf_compare_df["Total Return %"]],
             textposition="outside",
         ))
-        bar_ret.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.6)
+        bar_ret.add_hline(y=0, line_color=COLORS["fg_dim"], opacity=0.6)
         bar_ret.update_layout(
             title="Total Return % by Formula",
             yaxis_title="Return %", xaxis_title="",
             height=360, margin=dict(l=44, r=44, t=56, b=40),
         )
-        ui.apply_chart_theme(bar_ret)
+        apply_chart_theme(bar_ret)
         st.plotly_chart(bar_ret, use_container_width=True)
 
         st.download_button(
@@ -1286,353 +1394,10 @@ def render_backtest_page():
     )
 
 
-# ── multi-window backtest ────────────────────────────────────────────────────
-
-def render_multiwindow_page():
-    ui.page_header("multiwindow")
-    st.markdown(
-        "Asymmetric windows: a single **long** position is held across the long-test span, "
-        "while **shorts** are rebalanced in rolling intervals (each with its own train + test) "
-        "inside the same span. Long-horizon momentum on the long side, short-horizon reversals "
-        "on the short side."
-    )
-
-    with st.expander("How this works"):
-        st.markdown(
-            "**Long side**: train and test windows derived from `T = test end date`.\n"
-            "```\n"
-            "long_test_end   = T\n"
-            "long_test_start = T − long_test_months\n"
-            "long_train_end  = long_test_start\n"
-            "long_train_start= long_train_end − long_train_months\n"
-            "```\n"
-            "Top-N by score in `long_train` are held LONG for the whole `long_test` window.\n\n"
-            "**Short side**: rolling intervals of length `short_test_months` filling `long_test`.\n"
-            "```\n"
-            "for i in 0 .. floor(long_test / short_test) − 1:\n"
-            "  short_test_start[i] = long_test_start + i × short_test_months\n"
-            "  short_test_end[i]   = short_test_start[i] + short_test_months\n"
-            "  short_train_start[i]= short_test_start[i] − short_train_months\n"
-            "  short_train_end[i]  = short_test_start[i]\n"
-            "```\n"
-            "Each cycle picks **bottom-N by score** on its own train window and holds short for that interval. "
-            "Capital is recycled — the same `$short_per_side` is redeployed each cycle.\n\n"
-            "**P&L aggregation**\n"
-            "```\n"
-            "Long P&L      = Σ alloc_long(x)  × actual_pct_long(x) / 100\n"
-            "Short P&L_i   = Σ alloc_short(x) × (−actual_pct_short_i(x)) / 100\n"
-            "Total P&L     = Long P&L + Σ_i Short P&L_i\n"
-            "Total Inv $   = $long_per_side + $short_per_side  (capital recycled, peak exposure)\n"
-            "Total Return %= Total P&L / Total Inv $ × 100\n"
-            "```"
-        )
-
-    real_today = datetime.date.today()
-
-    st.sidebar.markdown(
-        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
-        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Multi-window settings</div>',
-        unsafe_allow_html=True,
-    )
-    test_end = st.sidebar.date_input(
-        "Anchor (test end) date",
-        value=real_today, max_value=real_today,
-    )
-
-    st.sidebar.markdown("**Long side**")
-    long_train_m = st.sidebar.slider("Long train (months)", 1, 36, 12, key="mw_lt")
-    long_test_m = st.sidebar.slider("Long test (months)", 1, 24, 12, key="mw_le")
-
-    st.sidebar.markdown("**Short side (rolling)**")
-    short_train_m = st.sidebar.slider("Short train (months)", 1, 12, 1, key="mw_st")
-    short_test_m = st.sidebar.slider("Short test interval (months)", 1, 12, 1, key="mw_se")
-
-    st.sidebar.markdown("---")
-    etf_text = st.sidebar.text_area(
-        "Tickers", value=", ".join(DEFAULT_ETF_LIST), height=140, key="mw_tk",
-    )
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Score formula**")
-    use_diff = st.sidebar.checkbox("(ExpReg − Price)", value=True, key="mw_ud")
-    use_r = st.sidebar.checkbox("r", value=True, key="mw_ur")
-    use_b = st.sidebar.checkbox("b", value=True, key="mw_ub")
-    use_sharpe = st.sidebar.checkbox("Sharpe", value=False, key="mw_us")
-
-    st.sidebar.markdown("---")
-    top_n = st.sidebar.number_input("Top / bottom N", 1, 30, 10, key="mw_n")
-    long_usd = st.sidebar.number_input("$ per side — Long", 100.0, 1_000_000.0, 1000.0, 100.0, key="mw_lu")
-    short_usd = st.sidebar.number_input("$ per side — Short", 100.0, 1_000_000.0, 1000.0, 100.0, key="mw_su")
-    rf_annual_mw = st.sidebar.number_input("Risk-free %", 0.0, 20.0, 4.5, 0.1, key="mw_rf")
-    rf_daily_mw = (rf_annual_mw / 100) / TRADING_DAYS_PER_YEAR
-
-    run_mw = st.sidebar.button("▶ Run Multi-Window Backtest", type="primary", use_container_width=True)
-
-    long_test_start = test_end - relativedelta(months=long_test_m)
-    long_train_start = long_test_start - relativedelta(months=long_train_m)
-
-    intervals: list[dict] = []
-    n_intervals = max(1, long_test_m // short_test_m)
-    for i in range(n_intervals):
-        st_start = long_test_start + relativedelta(months=i * short_test_m)
-        st_end = st_start + relativedelta(months=short_test_m)
-        if st_end > test_end:
-            st_end = test_end
-        if st_start >= test_end:
-            break
-        st_train_start = st_start - relativedelta(months=short_train_m)
-        intervals.append({
-            "i": i,
-            "train_start": st_train_start,
-            "train_end": st_start,
-            "test_start": st_start,
-            "test_end": st_end,
-        })
-
-    st.markdown(
-        f"**Long**:&nbsp; train `{long_train_start} → {long_test_start}` &nbsp;|&nbsp; "
-        f"test `{long_test_start} → {test_end}`  ({long_train_m}+{long_test_m} mo)"
-    )
-    st.markdown(
-        f"**Short cycles** ({len(intervals)}):&nbsp; train `{short_train_m}mo` → test `{short_test_m}mo`, "
-        f"rolling forward inside the long-test span."
-    )
-
-    timeline = go.Figure()
-    timeline.add_trace(go.Scatter(
-        x=[long_train_start, long_test_start], y=[1, 1], mode="lines",
-        line=dict(color=ui.COLORS["fg_faint"], width=8), name="Long train", hoverinfo="skip",
-    ))
-    timeline.add_trace(go.Scatter(
-        x=[long_test_start, test_end], y=[1, 1], mode="lines",
-        line=dict(color=ui.COLORS["gain"], width=14), name="Long held", hoverinfo="skip",
-    ))
-    for iv in intervals:
-        timeline.add_trace(go.Scatter(
-            x=[iv["train_start"], iv["test_start"]], y=[0.5, 0.5], mode="lines",
-            line=dict(color=ui.COLORS["fg_faint"], width=4), showlegend=False, hoverinfo="skip",
-        ))
-        timeline.add_trace(go.Scatter(
-            x=[iv["test_start"], iv["test_end"]], y=[0.5, 0.5], mode="lines",
-            line=dict(color=ui.COLORS["loss"], width=8), showlegend=False, hoverinfo="skip",
-        ))
-    timeline.update_layout(
-        height=200, margin=dict(l=24, r=24, t=46, b=30),
-        yaxis=dict(showticklabels=False, range=[0.2, 1.4], fixedrange=True, showgrid=False, zeroline=False),
-        xaxis_title="Date",
-        title="Asymmetric timeline — top: long held, bottom: short cycles",
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
-    )
-    ui.apply_chart_theme(timeline)
-    st.plotly_chart(timeline, use_container_width=True)
-
-    if not run_mw:
-        st.info("Configure windows + tickers, then click **Run Multi-Window Backtest**.")
-        return
-
-    raw_tickers = [t.strip().upper() for t in etf_text.replace("\n", ",").split(",")]
-    tickers = [t for t in raw_tickers if t]
-    if not tickers:
-        st.error("No tickers provided.")
-        return
-
-    components = {"diff": use_diff, "r": use_r, "b": use_b, "sharpe": use_sharpe}
-
-    # ── compute LONG basket ─────────────────────────────────────────────────
-    long_factors: list[dict] = []
-    failed: list[str] = []
-    progress = st.progress(0.0, text="Computing long-side factors...")
-    for i, tk in enumerate(tickers, start=1):
-        progress.progress(i / len(tickers), text=f"Long {tk} ({i}/{len(tickers)})")
-        try:
-            f = compute_factors(tk, long_train_start, long_test_start, test_end, rf_daily_mw)
-        except Exception:  # noqa: BLE001
-            f = None
-        if f is None:
-            failed.append(tk)
-        else:
-            long_factors.append(f)
-    progress.empty()
-
-    long_rows = [build_result_row(f, components) for f in long_factors]
-    long_df = pd.DataFrame(long_rows).dropna(subset=["Score"]).sort_values("Score", ascending=False)
-    longs = long_df.head(int(top_n)).copy()
-    if not longs.empty:
-        eligible = longs["Score"] > 0
-        eligible_score = longs["Score"].abs() * eligible.astype(float)
-        abs_sum = eligible_score.sum() or 1.0
-        longs["Weight"] = (eligible_score / abs_sum).round(4)
-        longs["$ Allocation"] = (longs["Weight"] * long_usd).round(2)
-        longs["P&L $"] = (longs["$ Allocation"] * longs["Actual %"] / 100).round(2)
-    long_pnl = float(longs["P&L $"].sum()) if not longs.empty else 0.0
-    long_invested = float(longs["$ Allocation"].sum()) if not longs.empty else 0.0
-
-    # ── short cycles ────────────────────────────────────────────────────────
-    cycle_rows: list[dict] = []
-    cycle_baskets: list[pd.DataFrame] = []
-    progress = st.progress(0.0, text="Computing short cycles...")
-    total_steps = len(intervals) * len(tickers)
-    step = 0
-    for iv in intervals:
-        cycle_factors = []
-        for tk in tickers:
-            step += 1
-            progress.progress(step / max(total_steps, 1), text=f"Cycle {iv['i']+1}/{len(intervals)} · {tk}")
-            try:
-                f = compute_factors(tk, iv["train_start"], iv["test_start"], iv["test_end"], rf_daily_mw)
-            except Exception:  # noqa: BLE001
-                f = None
-            if f is not None:
-                cycle_factors.append(f)
-        rows = [build_result_row(f, components) for f in cycle_factors]
-        cdf = pd.DataFrame(rows).dropna(subset=["Score"]).sort_values("Score", ascending=False)
-        shorts = cdf.tail(int(top_n)).copy() if len(cdf) >= int(top_n) else cdf.copy()
-        if not shorts.empty:
-            eligible = (shorts["Score"] < 0) & (shorts["r"] < 0) & (shorts["b"] < 0)
-            eligible_score = shorts["Score"].abs() * eligible.astype(float)
-            abs_sum = eligible_score.sum() or 1.0
-            shorts["Weight"] = (eligible_score / abs_sum).round(4)
-            shorts["$ Allocation"] = (shorts["Weight"] * short_usd).round(2)
-            shorts["P&L $"] = (shorts["$ Allocation"] * (-shorts["Actual %"]) / 100).round(2)
-        cycle_pnl = float(shorts["P&L $"].sum()) if not shorts.empty else 0.0
-        cycle_invested = float(shorts["$ Allocation"].sum()) if not shorts.empty else 0.0
-        cycle_ret = (cycle_pnl / cycle_invested * 100) if cycle_invested else 0.0
-        cycle_rows.append({
-            "Cycle": iv["i"] + 1,
-            "Train": f"{iv['train_start']} → {iv['train_end']}",
-            "Test": f"{iv['test_start']} → {iv['test_end']}",
-            "Names": len(shorts),
-            "Invested $": round(cycle_invested, 2),
-            "P&L $": round(cycle_pnl, 2),
-            "Return %": round(cycle_ret, 2),
-            "Top short": shorts["Ticker"].iloc[0] if not shorts.empty else "—",
-            "Bottom short": shorts["Ticker"].iloc[-1] if not shorts.empty else "—",
-        })
-        cycle_baskets.append(shorts.assign(Cycle=iv["i"] + 1))
-    progress.empty()
-
-    short_pnl = sum(r["P&L $"] for r in cycle_rows)
-    total_pnl = long_pnl + short_pnl
-    total_inv = long_invested + short_usd  # short capital is recycled, so peak = $short_per_side
-    total_ret = (total_pnl / total_inv * 100) if total_inv > 0 else 0.0
-
-    # ── headline P&L hero ──────────────────────────────────────────────────
-    ui.pnl_card(
-        total_ret_pct=total_ret,
-        total_pnl=total_pnl,
-        total_inv=total_inv,
-        long_pnl=long_pnl,
-        short_pnl=short_pnl,
-    )
-
-    # ── long basket ─────────────────────────────────────────────────────────
-    st.markdown(
-        '<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">'
-        + ui.pill("HELD", "solid-long")
-        + '<span style="font-size:14px;font-weight:600;color:var(--fg-strong)">Long basket</span>'
-        + '<span style="font-size:11.5px;color:var(--fg-dim)">held the entire long-test window</span>'
-        + '</div>',
-        unsafe_allow_html=True,
-    )
-    if longs.empty:
-        st.info("No long positions.")
-    else:
-        st.dataframe(
-            longs[["Ticker", "Score", "r", "Actual %", "Weight", "$ Allocation", "P&L $"]],
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(f"Long invested ${long_invested:,.2f} · P&L ${long_pnl:+,.2f} · "
-                   f"return {(long_pnl / long_invested * 100 if long_invested else 0):+.2f}%")
-
-    # ── short cycles summary ────────────────────────────────────────────────
-    st.markdown(
-        '<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">'
-        + ui.pill("ROTATION", "solid-short")
-        + '<span style="font-size:14px;font-weight:600;color:var(--fg-strong)">Short cycles</span>'
-        + '<span style="font-size:11.5px;color:var(--fg-dim)">rebalanced every short-test window</span>'
-        + '</div>',
-        unsafe_allow_html=True,
-    )
-    cycle_df = pd.DataFrame(cycle_rows)
-    st.dataframe(cycle_df, use_container_width=True, hide_index=True)
-
-    bar = go.Figure()
-    colors = [ui.COLORS["gain"] if v >= 0 else ui.COLORS["loss"] for v in cycle_df["P&L $"]]
-    bar.add_trace(go.Bar(
-        x=[f"#{c}" for c in cycle_df["Cycle"]],
-        y=cycle_df["P&L $"],
-        marker_color=colors,
-        marker_line_width=0,
-        text=[f"${v:+,.0f}" for v in cycle_df["P&L $"]],
-        textposition="outside",
-    ))
-    bar.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.5)
-    bar.update_layout(
-        title="Short P&L by cycle ($)",
-        height=340, margin=dict(l=44, r=44, t=56, b=40),
-        yaxis_title="P&L $", xaxis_title="Cycle",
-    )
-    ui.apply_chart_theme(bar)
-    st.plotly_chart(bar, use_container_width=True)
-
-    # ── equity curve (cumulative P&L) ───────────────────────────────────────
-    line = go.Figure()
-    line.add_trace(go.Scatter(
-        x=list(range(1, len(cycle_df) + 1)),
-        y=cycle_df["P&L $"].cumsum(),
-        mode="lines+markers", name="Cumulative short P&L",
-        line=dict(color=ui.COLORS["loss"], width=3),
-        marker=dict(size=7),
-    ))
-    line.add_hline(
-        y=long_pnl, line_dash="dash", line_color=ui.COLORS["gain"],
-        annotation_text=f"Long P&L ${long_pnl:+,.0f}",
-        annotation_position="top right",
-        annotation_font_color=ui.COLORS["gain"],
-    )
-    line.update_layout(
-        title="Cumulative short P&L vs realized long P&L",
-        xaxis_title="Cycle", yaxis_title="$ P&L",
-        height=340, margin=dict(l=44, r=44, t=56, b=40),
-    )
-    ui.apply_chart_theme(line)
-    st.plotly_chart(line, use_container_width=True)
-
-    # ── per-cycle baskets ───────────────────────────────────────────────────
-    with st.expander(f"Per-cycle short baskets ({len(cycle_baskets)})"):
-        for cb in cycle_baskets:
-            if cb.empty:
-                continue
-            cyc = int(cb["Cycle"].iloc[0])
-            st.markdown(f"**Cycle {cyc}**")
-            st.dataframe(
-                cb[["Ticker", "Score", "r", "Actual %", "Weight", "$ Allocation", "P&L $"]],
-                use_container_width=True, hide_index=True,
-            )
-
-    # ── exports ─────────────────────────────────────────────────────────────
-    cdl1, cdl2 = st.columns(2)
-    cdl1.download_button(
-        "📥 Cycle summary CSV",
-        cycle_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"multiwindow_cycles_{test_end}.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-    if cycle_baskets:
-        all_shorts = pd.concat(cycle_baskets, ignore_index=True)
-        cdl2.download_button(
-            "📥 All short positions CSV",
-            all_shorts.to_csv(index=False).encode("utf-8"),
-            file_name=f"multiwindow_shorts_{test_end}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
+# ── walk-forward backtest ──────────────────────────────────────────────────
 
 def render_walkforward_page():
-    ui.page_header("walkforward")
+    page_header("walkforward")
     st.markdown(
         "Roll a fixed train→test window forward through history. Each cycle: train on the "
         "preceding window, build the portfolio, hold across the test window, record P&L. "
@@ -1641,11 +1406,7 @@ def render_walkforward_page():
     )
 
     real_today = datetime.date.today()
-    st.sidebar.markdown(
-        '<div style="font-size:11px; text-transform:uppercase; letter-spacing:.08em; '
-        'color: var(--fg-muted); font-weight:700; padding:6px 4px 8px;">Walk-forward settings</div>',
-        unsafe_allow_html=True,
-    )
+    st.sidebar.markdown("### Walk-forward settings")
 
     start_date = st.sidebar.date_input(
         "Start date", value=real_today - relativedelta(years=2), max_value=real_today,
@@ -1809,9 +1570,9 @@ def render_walkforward_page():
 
     # ── three-mode summary ───────────────────────────────────────────────
     modes = [
-        {"key": "ls", "label": "Long + Short", "color": ui.COLORS["c1"]},
-        {"key": "l",  "label": "Long only",    "color": ui.COLORS["gain"]},
-        {"key": "s",  "label": "Short only",   "color": ui.COLORS["loss"]},
+        {"key": "ls", "label": "Long + Short", "color": COLORS["c1"]},
+        {"key": "l",  "label": "Long only",    "color": COLORS["gain"]},
+        {"key": "s",  "label": "Short only",   "color": COLORS["loss"]},
     ]
     summary: dict[str, dict] = {}
     for m in modes:
@@ -1835,28 +1596,19 @@ def render_walkforward_page():
 
     # mode palette matches the design system
     MODE_PALETTE = {
-        "ls": ui.COLORS["c1"],
-        "l":  ui.COLORS["gain"],
-        "s":  ui.COLORS["loss"],
+        "ls": COLORS["c1"],
+        "l":  COLORS["gain"],
+        "s":  COLORS["loss"],
     }
 
-    st.markdown(
-        f"""
-        <div style="display:flex;align-items:center;gap:12px;margin:6px 0 12px;">
-          <span class="qrl-eyebrow" style="margin:0;">Starting capital</span>
-          <span class="qrl-num" style="font-size:18px;font-weight:600;color:var(--fg-strong);">${starting_usd:,.2f}</span>
-          <span style="font-size:11.5px;color:var(--fg-dim);">across {len(df)} cycles</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"**Starting capital:** ${starting_usd:,.2f} &nbsp; across {len(df)} cycles")
 
     bcols = st.columns(3)
     for col, m in zip(bcols, modes):
         s = summary[m["key"]]
         ending = s["ending_usd"]
         with col:
-            ui.mode_card(
+            mode_card(
                 name=m["label"],
                 color=MODE_PALETTE[m["key"]],
                 ending_usd=ending,
@@ -1881,10 +1633,10 @@ def render_walkforward_page():
             hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>$%{{y:,.2f}}<extra></extra>",
         ))
     eq_fig.add_hline(
-        y=starting_usd, line_dash="dash", line_color=ui.COLORS["fg_dim"], opacity=0.6,
+        y=starting_usd, line_dash="dash", line_color=COLORS["fg_dim"], opacity=0.6,
         annotation_text=f"start ${starting_usd:,.0f}",
         annotation_position="left",
-        annotation_font_color=ui.COLORS["fg_dim"],
+        annotation_font_color=COLORS["fg_dim"],
     )
     eq_fig.update_layout(
         title="Equity curves — three portfolio modes compounded in parallel",
@@ -1892,7 +1644,7 @@ def render_walkforward_page():
         height=420, margin=dict(l=44, r=44, t=56, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    ui.apply_chart_theme(eq_fig)
+    apply_chart_theme(eq_fig)
     st.plotly_chart(eq_fig, use_container_width=True)
 
     # ── per-cycle return % grouped bars ──────────────────────────────────
@@ -1904,14 +1656,14 @@ def render_walkforward_page():
             marker_color=m["color"], marker_line_width=0,
             hovertemplate=f"<b>{m['label']}</b><br>%{{x}}<br>%{{y:+.2f}}%<extra></extra>",
         ))
-    bar_fig.add_hline(y=0, line_color=ui.COLORS["fg_dim"], opacity=0.5)
+    bar_fig.add_hline(y=0, line_color=COLORS["fg_dim"], opacity=0.5)
     bar_fig.update_layout(
         title="Per-cycle return % — by mode",
         barmode="group", height=360, yaxis_title="Return %",
         margin=dict(l=44, r=44, t=56, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    ui.apply_chart_theme(bar_fig)
+    apply_chart_theme(bar_fig)
     st.plotly_chart(bar_fig, use_container_width=True)
 
     # ── per-cycle table ─────────────────────────────────────────────────
@@ -1934,7 +1686,7 @@ def render_walkforward_page():
     )
 
     # ── per-cycle inspector ───────────────────────────────────────────────
-    ui.section_header(
+    section_header(
         "Cycle inspector",
         "pick a cycle to see picks, predicted vs actual, weights, per-name P&L",
     )
@@ -1962,13 +1714,7 @@ def render_walkforward_page():
 
     bcol1, bcol2 = st.columns(2)
     with bcol1:
-        st.markdown(
-            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
-            + ui.pill("LONG", "solid-long")
-            + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(long_b)} positions</span>'
-            + '</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"**🟢 LONG** — {len(long_b)} positions")
         if long_b.empty:
             st.info("No long positions this cycle.")
         else:
@@ -1976,13 +1722,7 @@ def render_walkforward_page():
             st.caption(f"Hit rate **{wins}/{len(long_b)}** correct ({wins/len(long_b)*100:.0f}%)")
             st.dataframe(long_b[pred_cols], use_container_width=True, hide_index=True)
     with bcol2:
-        st.markdown(
-            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 8px;">'
-            + ui.pill("SHORT", "solid-short")
-            + f'<span style="font-size:13px;font-weight:600;color:var(--fg-strong)">{len(short_b)} positions</span>'
-            + '</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f"**🔴 SHORT** — {len(short_b)} positions")
         if short_b.empty:
             st.info("No short positions this cycle.")
         else:
@@ -2010,34 +1750,12 @@ def render_walkforward_page():
 # ── sidebar ─────────────────────────────────────────────────────────────────
 
 # Brand header inside the rail
-st.sidebar.markdown(
-    """
-    <div style="display:flex; align-items:center; gap:11px; padding:14px 6px 14px;">
-      <div style="width:30px; height:30px; border-radius:8px;
-                  background: linear-gradient(135deg, var(--accent), var(--accent-dim));
-                  display:grid; place-items:center; color: var(--on-accent);
-                  font-weight:700; font-size:14px;
-                  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 14px var(--accent-ghost);">◇</div>
-      <div style="line-height:1.15;">
-        <div style="font-weight:600; font-size:14px; color: var(--fg-strong); letter-spacing:-0.02em;">Quantum<span style="color: var(--accent-strong);">Risk</span></div>
-        <div style="font-size:10px; color: var(--fg-dim); font-weight:500;
-                    letter-spacing:0.07em; text-transform:uppercase;">Lab</div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.sidebar.markdown(
-    '<div style="font-size:10px; text-transform:uppercase; letter-spacing:.09em; '
-    'color: var(--fg-faint); font-weight:700; padding:8px 6px 6px;">Analysis</div>',
-    unsafe_allow_html=True,
-)
+st.sidebar.title("📈 Risk Return Ratio Project")
+st.sidebar.markdown("**Analysis**")
 
 PAGE_LABELS = {
     "Dashboard": "dashboard",
     "Backtest Validator": "validator",
-    "Multi-Window Backtest": "multiwindow",
     "Walk-Forward": "walkforward",
 }
 
@@ -2052,10 +1770,6 @@ st.sidebar.markdown("---")
 
 if page == "Backtest Validator":
     render_backtest_page()
-    st.stop()
-
-if page == "Multi-Window Backtest":
-    render_multiwindow_page()
     st.stop()
 
 if page == "Walk-Forward":
@@ -2244,7 +1958,7 @@ def build_chart(
             x=prices.index,
             y=prices.values,
             name=f"{tk} Price",
-            line=dict(color=ui.COLORS["fg_muted"], width=2),
+            line=dict(color=COLORS["fg_muted"], width=2),
             fill="tozeroy",
             fillcolor="rgba(45, 212, 191, 0.06)",
         ),
@@ -2257,7 +1971,7 @@ def build_chart(
                 x=exp_fitted.index,
                 y=exp_fitted.values,
                 name="Exp. Regression",
-                line=dict(color=ui.COLORS["accent"], width=2, dash="dash"),
+                line=dict(color=COLORS["accent"], width=2, dash="dash"),
             ),
             secondary_y=False,
         )
@@ -2316,7 +2030,7 @@ def build_chart(
         margin=dict(l=44, r=44, t=68, b=40),
     )
     fig.update_xaxes(title_text="Date")
-    ui.apply_chart_theme(fig)
+    apply_chart_theme(fig)
 
     p_opts: dict = dict(title_text="Price ($)")
     if not price_auto and price_min is not None and price_max is not None:
@@ -2342,7 +2056,7 @@ def render_summary(
     full_period_results: dict[str, float],
 ):
     """Render summary-statistic metrics into *container*."""
-    ui.eyebrow("Summary statistics", container=container)
+    eyebrow("Summary statistics", container=container)
 
     period_return = (prices.iloc[-1] / prices.iloc[0] - 1) * 100
     annual_vol = returns.std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
@@ -2418,7 +2132,7 @@ def render_manual_calcs(
     """Render manual-calculation expanders into *container*."""
     if not selected_ratios:
         return
-    ui.section_header("Math inspector", "formula, inputs, result — per selected ratio", container=container)
+    section_header("Math inspector", "formula, inputs, result — per selected ratio", container=container)
     for selected_ratio in selected_ratios:
         full_ratio_value = full_ratio_values[selected_ratio]
         with container.expander(f"📐 {selected_ratio} — formula variables", expanded=False):
@@ -2516,8 +2230,8 @@ def render_exp_regression(container, prices: pd.Series, ratio_value: float):
     if fitted_series is None:
         return None
 
-    ui.divider(container=container)
-    ui.section_header("Exponential regression", "log-linear fit · composite score", container=container)
+    divider(container=container)
+    section_header("Exponential regression", "log-linear fit · composite score", container=container)
 
     current_price = float(prices.iloc[-1])
     exp_reg_at_end = float(exp_a * np.exp(exp_b * (len(prices) - 1)))
@@ -2612,7 +2326,7 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
     # Ticker header card
     last_price = float(prices.iloc[-1])
     period_chg = (float(prices.iloc[-1]) / float(prices.iloc[0]) - 1.0) * 100.0
-    ui.ticker_head(tk, f"{period_label} period", last_price, period_chg, container=container)
+    ticker_head(tk, f"{period_label} period", last_price, period_chg, container=container)
 
     rolling_res, full_res = compute_ratios(prices, returns, br)
     fig = build_chart(tk, prices, rolling_res, full_res, exp_fitted=exp_fitted)
@@ -2631,7 +2345,7 @@ def render_stock_panel(container, tk: str, bench_ret: pd.Series | None):
 
 # ── main area ───────────────────────────────────────────────────────────────
 
-ui.page_header("dashboard")
+page_header("dashboard")
 
 if not ticker:
     st.warning("Please enter a ticker symbol in the sidebar.")
