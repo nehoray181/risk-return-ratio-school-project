@@ -1756,7 +1756,7 @@ st.sidebar.markdown("**Analysis**")
 PAGE_LABELS = {
     "Dashboard": "dashboard",
     "Backtest Validator": "validator",
-    "Walk-Forward": "walkforward",
+    # "Walk-Forward": "walkforward",  # hidden — unhide by uncommenting
 }
 
 page = st.sidebar.radio(
